@@ -11,7 +11,7 @@ related: [C0, A3]
 
 # caller-identity
 
-The contract of record for caller-identity: what a consumer can depend on, admitted to zorg's component set by the director's rulings `D35` and `D37` in zorg's `docs/DECISIONS.md`; its vision awaits the director's ratification, and until then this contract is a draft.\
+The contract of record for caller-identity: what a consumer can depend on, admitted to zorg's component set by the director's rulings `D35` and `D37` in zorg's `docs/DECISIONS.md`; its vision is ratified (zorg's `D43`), and this contract is a draft until its capabilities are built and verified.\
 It also carries the fields of a mission-kit registry entry, and that entry is generated from this file when the component is filed, never written as a second copy.\
 The registry id is unminted on purpose; one is minted only when the entry is admitted to the registry.
 

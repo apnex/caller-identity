@@ -1,12 +1,11 @@
 # caller-identity - Vision
 
-**Status: drafted 2026-10-10 under zorg's `D35` and `D37`; not ratified.**\
+**Status: ratified by the director, 2026-10-11 (zorg's `docs/DECISIONS.md`, `D43`); enduring.**\
 This document states why caller-identity exists and what it will never be.\
 It carries no current state, no roadmap, and no schedule.
 
 Holding this document authorises nothing.\
 It does not ratify a decision, admit a component to any registry, or approve a contract change.\
-Until the director ratifies it, it is a proposal, and nothing may cite it as enduring.\
 A change of direction is recorded as a decision first and absorbed here afterwards.
 
 ---

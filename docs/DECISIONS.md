@@ -18,3 +18,14 @@ Its contract of record is `CONTRACT.md` (zorg's `D17`), and its vision becomes e
 
 **Why.**\
 It holds no application's content, so it is a shared component even while one application builds it (zorg's `D35`), and both zorg and drawv2 need it (zorg's `D37`).
+
+---
+
+## D2 - The vision is ratified
+
+**Ruled by:** the director, 2026-10-11 (zorg's `D43`).\
+**Affects:** `VISION.md`.
+
+**Ruling.**\
+The vision is ratified at `2ecca85`, after two rounds of cold reading by three model families, and its status line says so.\
+From here it changes only by a recorded decision, absorbed into it.
