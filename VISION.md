@@ -13,18 +13,19 @@ A change of direction is recorded as a decision first and absorbed here afterwar
 
 ## North star
 
-> Let every operation know which principal is calling it, from the evidence its caller presented and the rules its host chose, and never claim more certainty about that principal than the evidence gives.
+> Let every operation know which principal is calling it, or that none is established, from the evidence its caller presented and the rules its host chose, and never claim more certainty about that principal than the evidence gives.
 
-Four terms in that sentence carry weight, so this document defines them rather than leaving them to the reader.
+Four terms in that sentence carry weight, so this document defines them rather than leaving them to the reader; a *host* is the side of a service that receives requests, and an *operation* is what a request asks of it.
 
 **Principal** means the identity a host attributes a request to: an agent, a person, or a service.\
 It is the name a writer is recorded under and a policy rules on, not the address or the connection the request arrived by.
 
-**Evidence** means what a caller presents or a transport observes about who is calling: a name the caller asserts, a key it proved it holds, a token a verifier accepted, or the headers of a proxy the host trusts.
+**Evidence** means what a caller presents or a transport observes about who is calling: a name the caller asserts, a key it proved it holds, a token a verifier accepted, or the headers of a proxy the host trusts.\
+It arrives with a session, when a connection is admitted, or with a single request, as a token or a proxy's headers can.
 
-**The rules its host chose** means the application decides which evidence it accepts and how accepted evidence becomes a principal, and supplies the verifiers that check it.
+**The rules its host chose** means the application decides which evidence it accepts and how accepted evidence becomes a principal, and supplies the verifiers that check it; evidence that conflicts establishes no principal unless the host's rules say which wins.
 
-**More certainty than the evidence gives** means every principal is marked with how it was established - asserted or proved - and a principal that was only asserted is never presented as proved, by inference or by default.
+**More certainty than the evidence gives** means every principal is marked with how it was established: proved, when the transport's own proof or a verifier the host supplied established it, and asserted otherwise; a principal that was only asserted is never presented as proved, by inference or by default.
 
 ---
 
@@ -44,7 +45,7 @@ caller-identity builds that bridge once, so every operation of a host reads one 
 ## What it is
 
 An embeddable library used by the host side of a service.\
-When a session is admitted, it records the principal that session's evidence supports, under the host's rules; when a request arrives, it answers the request's operation with one record of who is calling - the principal, the evidence it came from, and whether it was proved.
+When a session is admitted, it records the principal that session's evidence supports, under the host's rules; when a request arrives, it answers the request's operation with one record of who is calling - the principal established by the request's own evidence or recorded for its session, the evidence it came from, and whether it was proved - or with a record saying none is established.
 
 The application supplies its rules and its verifiers; the transport supplies its evidence.
 
@@ -56,8 +57,8 @@ The application supplies its rules and its verifiers; the transport supplies its
 It says who is calling, never what that caller may do.\
 Ruling on a request is the application's policy, which reads the principal caller-identity gives it.
 
-**Not a transport or a security layer.**\
-It protects no channel and proves nothing itself; the transport observes, a verifier checks, and caller-identity records what they found.
+**Not a transport.**\
+It protects no channel and proves nothing itself; the transport observes, a verifier checks, and caller-identity records what they found, as certain as they made it.
 
 **Not an identity provider.**\
 It creates no accounts, runs no sign-in, and holds no passwords; it accepts the evidence of providers the application trusts.
