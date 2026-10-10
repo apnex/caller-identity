@@ -48,7 +48,7 @@ Issuing credentials - drawv2's connection codes among them, and the admission ke
 
 **Maturity: provisional**, designed under zorg's Delta 1, amendment 2, and zorg's rulings `D26`, `D31`, `D35` and `D37`.\
 Each declaration names the exit criterion of zorg's `docs/DELTAS/DELTA-1.md` that proves it and the test that exercises it.\
-AGP's evidence, admission port and delivery context are those of AGP at `4ae96f1`.
+AGP's evidence, admission port and delivery context are those of AGP at `1723c9d` (zorg's `D42`).
 
 **CI1 - A host's rule.**\
 A host gives caller-identity a rule that turns a session's evidence into a principal or into none.\
