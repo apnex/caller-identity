@@ -40,7 +40,7 @@ The trait column names any trait a system takes on by using the capability.
 The component holds the principals of open and recently closed sessions in memory, so none of its capabilities brings a trait.\
 It coordinates no actors and contains no model.\
 In zorg's Delta 1, `session-principal` and `request-evidence` are built, under AGP's trusted-development security, where every principal is asserted; `verified-principal` is left out of Delta 1, and drawv2's sign-in through a trusted proxy, its connection codes and zorg's web canvas need it.\
-Issuing credentials - drawv2's connection codes among them - is an identity provider's job, which the vision excludes; caller-identity verifies them, through a verifier its host supplies.
+Issuing credentials - drawv2's connection codes among them, and the admission keys of zorg's `D38` - is credential-issuer's (zorg's `D39`), never caller-identity's, as the vision excludes; caller-identity verifies them, through a verifier its host supplies.
 
 ---
 
