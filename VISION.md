@@ -64,7 +64,7 @@ It protects no channel and proves nothing itself; the transport observes, a veri
 It creates no accounts, runs no sign-in, and holds no passwords; it accepts the evidence of providers the application trusts.
 
 **Not a store of users.**\
-It holds the principals of sessions open now, and of sessions closed only a short while, and nothing that must survive a restart.
+It holds the principals of sessions open now, and of sessions closed only a short while, and nothing that must survive a restart; it issues no credentials.
 
 **Not a guesser.**\
 Where the evidence does not establish a principal, a request has none, and the record says so.

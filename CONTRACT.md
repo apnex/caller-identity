@@ -34,13 +34,13 @@ The trait column names any trait a system takes on by using the capability.
 | Capability | Relation | Requires | What a consumer can depend on | Trait |
 |---|---|---|---|---|
 | `session-principal` | provides | `agp:peer-identity-evidence` | For each session the host admits, the principal its evidence supports under the host's rules is recorded with how it was established - asserted or proved - and kept until a stated time after the session closes; a session whose evidence supports none has none. | none |
-| `request-evidence` | provides | `agp:delivery-context` | Each request is answered, as it arrives, with one tagged record of who is calling: its origin, the principal recorded for the session it arrived on, and whether that principal was proved; a request whose origin is not that session's peer, or whose session has no principal, has no principal, and an asserted principal is never presented as proved. | none |
+| `request-evidence` | provides | `agp:delivery-context` | Each request is answered, as it arrives, with one tagged record of who is calling: its origin, the principal recorded for the session it arrived on, and whether that principal was proved; a request whose origin is not that session's peer, or whose session has no principal, has no principal from its session, and an asserted principal is never presented as proved; a principal a request's own evidence establishes is `verified-principal`'s. | none |
 | `verified-principal` | provides | none | A credential a caller presents - a token, or the headers of a proxy the host trusts - is checked by verifiers the host supplies, and a credential they accept gives a proved principal with its issuer and expiry; one they refuse gives none. | none |
-| `machine-credential` | provides | none | Credentials for callers that are programs are issued and revoked under the host's policy, each bound to the principal it names, shown once and stored only as a check value. | T1 |
 
-The component holds the principals of open and recently closed sessions in memory, so `session-principal` and `request-evidence` bring no trait; `machine-credential` keeps its records durably, so a system using it is stateful (`T1`).\
+The component holds the principals of open and recently closed sessions in memory, so none of its capabilities brings a trait.\
 It coordinates no actors and contains no model.\
-In zorg's Delta 1, `session-principal` and `request-evidence` are built, under AGP's trusted-development security, where every principal is asserted; `verified-principal` and `machine-credential` are rows left out of Delta 1, which drawv2's sign-in through a trusted proxy and its connection codes, and zorg's web canvas, need.
+In zorg's Delta 1, `session-principal` and `request-evidence` are built, under AGP's trusted-development security, where every principal is asserted; `verified-principal` is left out of Delta 1, and drawv2's sign-in through a trusted proxy, its connection codes and zorg's web canvas need it.\
+Issuing credentials - drawv2's connection codes among them - is an identity provider's job, which the vision excludes; caller-identity verifies them, through a verifier its host supplies.
 
 ---
 
@@ -68,7 +68,7 @@ A host asks as it receives the request, before anything else is done with it.\
 Tested by: `E18`, in `test/contract/request-evidence.test.js`, asserting the whole record for a well-formed node, a node whose name gives no principal, an origin that is not the ingress node, a delivery with no ingress, a request after its session's record was forgotten, and a reconnection.
 
 **CI4 - Certainty is never inferred.**\
-A record's `proved` is `true` only for a principal a verifier established (`verified-principal`, outside Delta 1); no rule, default or later step turns an asserted principal into a proved one, and a record's `kind` says what produced it, so a later kind of evidence is a new variant of the record rather than a change to this one.\
+A record's `proved` is `true` only for a principal the transport's own proof established - AGP's evidence of a verified peer - or a verifier the host supplied established (`verified-principal`, outside Delta 1); no rule, default or later step turns an asserted principal into a proved one, and a record's `kind` says what produced it, so a later kind of evidence is a new variant of the record rather than a change to this one.\
 Tested by: `E18`, in `test/contract/request-evidence.test.js`, which checks that every record produced under trusted-development security has `proved` `false`.
 
 **CI5 - What zorg composes.**\
@@ -89,7 +89,7 @@ This repository, `apnex/caller-identity`, private until its first working code: 
 ### Does my project want this at all
 
 - A service has remote callers, and records who wrote something or rules on what a caller may do.
-- Evidence of who is calling arrives with a connection, and the operations that need it see only requests.
+- Evidence of who is calling arrives with a connection or with a request, and the operations that need it see only requests.
 - Some callers are only asserted and some are proved, and the difference must not be lost.
 
 ### Does it meet my requirement
