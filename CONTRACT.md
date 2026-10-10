@@ -44,6 +44,39 @@ In zorg's Delta 1, `session-principal` and `request-evidence` are built, under A
 
 ---
 
+## Identity design
+
+**Maturity: provisional**, designed under zorg's Delta 1, amendment 2, and zorg's rulings `D26`, `D31`, `D35` and `D37`.\
+Each declaration names the exit criterion of zorg's `docs/DELTAS/DELTA-1.md` that proves it and the test that exercises it.\
+AGP's evidence, admission port and delivery context are those of AGP at `4ae96f1`.
+
+**CI1 - A host's rule.**\
+A host gives caller-identity a rule that turns a session's evidence into a principal or into none.\
+For AGP's trusted-development security, where the evidence is the name the peer's node asserts, caller-identity offers one rule, the asserted node rule: the principal is the node's name up to its first dot, when there is a dot and that part matches `^[a-z0-9][a-z0-9-]{0,62}$`, and is none otherwise - the naming operation-proxy gives the node of each identity's proxy (`PX1`); every principal it gives is asserted, never proved.\
+Tested by: `E18`, in `test/contract/session-principal.test.js`, for a name with a dot, one without, one whose first part breaks the pattern, and one with several dots.
+
+**CI2 - Admitting a session.**\
+The component offers an implementation of AGP's identity-admission port, which admits every peer unless the host gives it an admission ruling of its own, and records for each session it admits, keyed by the peer's node and the host node's own session identifier for it, the principal the host's rule gives and whether it was proved.\
+It learns that a session has closed from AGP's operational events, and forgets that session's record 60 seconds later, so a request dispatched just before the close still finds it.\
+Tested by: `E18`, in `test/contract/session-principal.test.js`, against AGP's production in-process carrier: an admitted session's record, a record still found 59 seconds after its session closed and gone at 61, a reconnection under a new session with a record of its own, and one session number used by two nodes, each with its own record.
+
+**CI3 - The evidence of a request.**\
+Given a request's delivery context - its origin node, and its ingress node and session when it arrived over a session - the component answers with one record, exactly `{"kind": "agp-session", "node": <the origin node>, "principal": <a principal or null>, "proved": <true or false>}`.\
+`node` is always the origin node; the ingress node and session only find the record.\
+`principal` is the recorded one, and `proved` its recorded certainty, when the origin node is the ingress node and a record exists for that ingress node and session; otherwise `principal` is `null` and `proved` is `false`.\
+A host asks as it receives the request, before anything else is done with it.\
+Tested by: `E18`, in `test/contract/request-evidence.test.js`, asserting the whole record for a well-formed node, a node whose name gives no principal, an origin that is not the ingress node, a delivery with no ingress, a request after its session's record was forgotten, and a reconnection.
+
+**CI4 - Certainty is never inferred.**\
+A record's `proved` is `true` only for a principal a verifier established (`verified-principal`, outside Delta 1); no rule, default or later step turns an asserted principal into a proved one, and a record's `kind` says what produced it, so a later kind of evidence is a new variant of the record rather than a change to this one.\
+Tested by: `E18`, in `test/contract/request-evidence.test.js`, which checks that every record produced under trusted-development security has `proved` `false`.
+
+**CI5 - What zorg composes.**\
+The hub of zorg gives caller-identity the asserted node rule, supplies its admission port to the hub's AGP node, and gives operation-call's host half its answer for each request as that request's evidence; zorg's own use of the record - the writer it names and the policy it applies - is zorg's `EM13`.\
+Tested by: `E5`, in zorg's `packages/zorg-hub/test/evidence.test.js` and `test/e2e/refusals-and-writers.test.js`.
+
+---
+
 ## Reference
 
 Not yet built.\
