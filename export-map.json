@@ -1,0 +1,14 @@
+{
+  "package": "@apnex/caller-identity",
+  "paths": {
+    ".": {
+      "exports": {
+        "createCallerIdentity": { "part": "caller-identity", "serves": ["session-principal", "request-evidence"] },
+        "assertedNodeRule": { "part": "caller-identity", "serves": ["session-principal"] }
+      }
+    }
+  },
+  "deferred": {
+    "verified-principal": "D37"
+  }
+}

@@ -30,7 +30,13 @@
     "docs:check": "tools/check-docs.sh"
   },
   "devDependencies": {
+    "@agp/core": "file:../agp/packages/core",
+    "@agp/node": "file:../agp/packages/node",
+    "@agp/transport-loopback": "file:../agp/packages/transport-loopback",
     "@types/node": "^24.0.0",
     "typescript": "5.9.3"
+  },
+  "peerDependencies": {
+    "@agp/core": "file:../agp/packages/core"
   }
 }

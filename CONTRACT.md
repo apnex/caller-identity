@@ -51,7 +51,7 @@ Each declaration names the exit criterion of zorg's `docs/DELTAS/DELTA-1.md` tha
 AGP's evidence, admission port and delivery context are those of AGP at `1723c9d` (zorg's `D42`).
 
 **CI1 - A host's rule.**\
-A host gives caller-identity a rule that turns a session's evidence into a principal or into none.\
+A host gives caller-identity a rule that turns a session's evidence into a principal or into none: a port whose `apply`, given AGP's identity-admission request, returns at once `{principal, proved}` or `null`; a rule that throws, or returns anything else, refuses the session, and nothing is recorded.\
 The component offers one rule, the asserted node rule, for AGP's trusted-development security: it reads only the peer's node name, as AGP's identity-admission request gives it in `remoteNodeId`, ignoring the transport's own evidence; the principal is that name up to its first dot, when there is a dot and that part matches `^[a-z0-9][a-z0-9-]{0,62}$`, and is none otherwise - the naming operation-proxy gives the node of each identity's proxy (`PX1`) - and every principal it gives is asserted, never proved.\
 So applied over AGP's production in-process carrier, whose transport evidence reports a verified same-process peer, the rule still gives an asserted principal; the evidence trusted-development WebSocket security actually reports, with no authentication and no protection, is observed by zorg's `E5`, in `packages/zorg-hub/test/evidence.test.js` over AGP's WebSocket transport, as zorg's `EM13` says.\
 Tested by: `E18`, in `test/contract/session-principal.test.js`, for a name with a dot, one without, one whose first part breaks the pattern, and one with several dots.
@@ -59,12 +59,15 @@ Tested by: `E18`, in `test/contract/session-principal.test.js`, for a name with 
 **CI2 - Admitting a session, and forgetting it.**\
 The component offers an implementation of AGP's identity-admission port, which admits every peer unless the host gives it an admission ruling of its own, and records for each session it admits, keyed by the peer's node and the host node's own session identifier for it, the principal the host's rule gives and whether it was proved; a record for a key already held replaces the earlier one.\
 It forgets records by sweeping, not by events, which AGP may drop.\
-Time is read from a clock port the host gives it, in milliseconds that a change to the wall clock does not move, by default `performance.now()`; the host starts the sweeping when it starts its node, and stops it when it stops the node.\
-Every 30 seconds by that clock it reads AGP's connection snapshot (`operations.connections()`), in which a session is present when an admitted connection has the record's peer as `remoteNodeId` and its session identifier as `sessionId`, or when a pending connection - one AGP has not yet committed, whose entry carries only the host's own session identifier - has it as `localSessionId`, because AGP asks the admission port before it commits the session.\
+Time is read from a clock port the host gives it, offering `now`, in milliseconds that a change to the wall clock does not move, and `schedule`, which runs a callback after a delay and can be cancelled; by default `performance.now()` and the runtime's timers.\
+The host starts the sweeping when it starts its node, giving it the node's operations, and stops it when it stops the node; starting it while it runs is an error, stopping it twice is not, and records stay readable after it stops.\
+Every 30 seconds by that clock - the first 30 seconds after it starts, and each one 30 seconds after the last actually ran - it reads AGP's connection snapshot (`operations.connections()`), in which a session is present when an admitted connection has the record's peer as `remoteNodeId` and its session identifier as `sessionId`, or when a pending connection - one AGP has not yet committed, whose entry carries only the host's own session identifier - has it as `localSessionId`, because AGP asks the admission port before it commits the session.\
 Each record keeps the time its session was last found present, starting at the moment it was admitted; the first sweep after that time that finds the session absent notes when absence was first seen; a later sweep that finds it present clears that; and the first sweep at which at least 60 seconds have passed since absence was first seen forgets the record.\
 A session closes after it was last found present and no later than absence was first seen, so its record is found by every request arriving less than 60 seconds after it closed, and is forgotten by the first sweep at least 60 seconds after absence was first seen, which falls within 90 seconds of its close.\
 Two things keep a record longer, and nothing keeps it shorter: sweeps that run late, by as much as they are late; and another connection, pending with the same session identifier, which AGP's opening time-out ends - a pending entry names no peer, so a record cannot tell its own pending session from another's, and is kept rather than lost.\
+A sweep whose snapshot cannot be read changes no record, so it can keep a record longer and never shorter.\
 A record admitted for a session refused, or closed, before it was established is forgotten the same way, from the moment it was admitted.\
+A session whose evidence gives no principal is recorded too, with `principal` `null`, and a host reads any session's record by its peer node and session identifier.\
 A key admitted again replaces its record, with the time of its new admission and no absence noted.\
 Tested by: `E18`, in `test/contract/session-principal.test.js`, against AGP's production in-process carrier with an injected clock port and sweeps: an admitted session's record; a session closed 1 millisecond after a sweep, whose record is found 59 seconds after the close, and is gone after the sweep 90 seconds after the last sweep that found it; a session closed at the instant of a sweep; a session admitted while pending at a sweep and established and closed between that sweep and the next, whose record is still found 59 seconds after its close; a sweep run 10 seconds late; another peer's pending connection with the same session identifier, which keeps the record until it ends; a session refused after admission before it was established; a reconnection under a new session with a record of its own; one session number used by two nodes, each with its own record; and a key admitted again, whose new record replaces the old and its noted absence.
 
@@ -76,7 +79,7 @@ A host asks as it receives the request, before anything else is done with it.\
 Tested by: `E18`, in `test/contract/request-evidence.test.js`, with the injected clock port and sweeps of `CI2`, asserting the whole record for a well-formed node, a node whose name gives no principal, an origin that is not the ingress node, a delivery with no ingress, a request 59 seconds after its session closed, one just before the sweep that forgets its record and one just after, a request of a session established and closed between two sweeps, 59 seconds after its close, a delivery context naming, as its ingress, a session refused after admission before it was established, while that session's record is kept and after it is forgotten, a reconnection, and one session number on two nodes.
 
 **CI4 - Certainty is never inferred.**\
-A record's `proved` is `true` only for a principal the transport's own proof established - AGP's evidence of a verified peer - or a verifier the host supplied established (`verified-principal`, outside Delta 1); no rule, default or later step turns an asserted principal into a proved one, and a record's `kind` says what produced it, so a later kind of evidence is a new variant of the record rather than a change to this one.\
+A record's `proved` is `true` only for a principal the transport's own proof established - AGP's evidence of a verified peer - or a verifier the host supplied established (`verified-principal`, outside Delta 1); the component records `proved` `true` only when the rule claims it and AGP's evidence reports a verified peer - whether such a principal must be the verified principal itself or may be mapped from it by the host's rule is `verified-principal`'s to design, outside Delta 1 - and no rule, default or later step turns an asserted principal into a proved one, and a record's `kind` says what produced it, so a later kind of evidence is a new variant of the record rather than a change to this one.\
 Tested by: `E18`, in `test/contract/request-evidence.test.js`, which checks that every record produced under trusted-development security has `proved` `false`.
 
 **CI5 - What zorg composes.**\
@@ -87,8 +90,10 @@ Tested by: `E5`, in zorg's `packages/zorg-hub/test/evidence.test.js` and `test/e
 
 ## Reference
 
-Not yet built.\
-This repository, `apnex/caller-identity`, private until its first working code: `VISION.md` and, once built, the implementation.
+This repository, `apnex/caller-identity`, private until its first working code is certified.\
+The package `@apnex/caller-identity` exports `createCallerIdentity`, which gives a host its identity-admission port, the sweeps it starts and stops with its node, each session's record and each request's evidence, and `assertedNodeRule`, as `export-map.json` records.\
+`verified-principal` is deferred under zorg's `D37`.\
+It takes AGP's types from `@agp/core` as a peer dependency, through a `file:` link to AGP's checkout, imports nothing from AGP at run time, and imports no module particular to one runtime.
 
 ---
 
