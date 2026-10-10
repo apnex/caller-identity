@@ -33,7 +33,7 @@ The trait column names any trait a system takes on by using the capability.
 
 | Capability | Relation | Requires | What a consumer can depend on | Trait |
 |---|---|---|---|---|
-| `session-principal` | provides | `agp:peer-identity-evidence` | For each session the host admits, the principal its evidence supports under the host's rules is recorded with how it was established - asserted or proved - and kept until a stated time after the session closes; a session whose evidence supports none has none. | none |
+| `session-principal` | provides | `agp:peer-identity-evidence`, `agp:read-only-observation` | For each session the host admits, the principal its evidence supports under the host's rules is recorded with how it was established - asserted or proved - and kept until a stated time after the session closes; a session whose evidence supports none has none. | none |
 | `request-evidence` | provides | `agp:delivery-context` | Each request is answered, as it arrives, with one tagged record of who is calling: its origin, the principal recorded for the session it arrived on, and whether that principal was proved; a request whose origin is not that session's peer, or whose session has no principal, has no principal from its session, and an asserted principal is never presented as proved; a principal a request's own evidence establishes is `verified-principal`'s. | none |
 | `verified-principal` | provides | none | A credential a caller presents - a token, or the headers of a proxy the host trusts - is checked by verifiers the host supplies, and a credential they accept gives a proved principal with its issuer and expiry; one they refuse gives none. | none |
 
@@ -52,20 +52,22 @@ AGP's evidence, admission port and delivery context are those of AGP at `4ae96f1
 
 **CI1 - A host's rule.**\
 A host gives caller-identity a rule that turns a session's evidence into a principal or into none.\
-For AGP's trusted-development security, where the evidence is the name the peer's node asserts, caller-identity offers one rule, the asserted node rule: the principal is the node's name up to its first dot, when there is a dot and that part matches `^[a-z0-9][a-z0-9-]{0,62}$`, and is none otherwise - the naming operation-proxy gives the node of each identity's proxy (`PX1`); every principal it gives is asserted, never proved.\
+The component offers one rule, the asserted node rule, for AGP's trusted-development security: it reads only the peer's node name, as AGP's identity-admission request gives it in `remoteNodeId`, ignoring the transport's own evidence; the principal is that name up to its first dot, when there is a dot and that part matches `^[a-z0-9][a-z0-9-]{0,62}$`, and is none otherwise - the naming operation-proxy gives the node of each identity's proxy (`PX1`) - and every principal it gives is asserted, never proved.\
+So applied over AGP's production in-process carrier, whose transport evidence reports a verified same-process peer, the rule still gives an asserted principal; the evidence trusted-development WebSocket security actually reports, with no authentication, is observed end to end by zorg's `E5`.\
 Tested by: `E18`, in `test/contract/session-principal.test.js`, for a name with a dot, one without, one whose first part breaks the pattern, and one with several dots.
 
-**CI2 - Admitting a session.**\
-The component offers an implementation of AGP's identity-admission port, which admits every peer unless the host gives it an admission ruling of its own, and records for each session it admits, keyed by the peer's node and the host node's own session identifier for it, the principal the host's rule gives and whether it was proved.\
-It learns that a session has closed from AGP's operational events, and forgets that session's record 60 seconds later, so a request dispatched just before the close still finds it.\
-Tested by: `E18`, in `test/contract/session-principal.test.js`, against AGP's production in-process carrier: an admitted session's record, a record still found 59 seconds after its session closed and gone at 61, a reconnection under a new session with a record of its own, and one session number used by two nodes, each with its own record.
+**CI2 - Admitting a session, and forgetting it.**\
+The component offers an implementation of AGP's identity-admission port, which admits every peer unless the host gives it an admission ruling of its own, and records for each session it admits, keyed by the peer's node and the host node's own session identifier for it, the principal the host's rule gives and whether it was proved; a record for a key already held replaces the earlier one.\
+It forgets records by sweeping, not by events, which AGP may drop: every 30 seconds by the host's clock, it reads AGP's connection snapshot (`operations.connections()`), notes the first sweep at which each record's session - matched by `remoteNodeId` and `sessionId` - is absent, and forgets a record whose session has been absent at sweeps spanning at least 60 seconds; a record admitted for a session that never became live, or closed before it was established, is forgotten the same way.\
+So a request dispatched as its session closes still finds the record for at least 60 seconds, and a record outlives its session by at most 90.\
+Tested by: `E18`, in `test/contract/session-principal.test.js`, against AGP's production in-process carrier with an injected clock: an admitted session's record, a record still found 60 seconds after its session closed and gone by 90, a session refused after admission before it was established, a reconnection under a new session with a record of its own, one session number used by two nodes, each with its own record, and a key admitted again, whose new record replaces the old.
 
 **CI3 - The evidence of a request.**\
 Given a request's delivery context - its origin node, and its ingress node and session when it arrived over a session - the component answers with one record, exactly `{"kind": "agp-session", "node": <the origin node>, "principal": <a principal or null>, "proved": <true or false>}`.\
 `node` is always the origin node; the ingress node and session only find the record.\
 `principal` is the recorded one, and `proved` its recorded certainty, when the origin node is the ingress node and a record exists for that ingress node and session; otherwise `principal` is `null` and `proved` is `false`.\
 A host asks as it receives the request, before anything else is done with it.\
-Tested by: `E18`, in `test/contract/request-evidence.test.js`, asserting the whole record for a well-formed node, a node whose name gives no principal, an origin that is not the ingress node, a delivery with no ingress, a request after its session's record was forgotten, and a reconnection.
+Tested by: `E18`, in `test/contract/request-evidence.test.js`, asserting the whole record for a well-formed node, a node whose name gives no principal, an origin that is not the ingress node, a delivery with no ingress, a request 60 seconds after its session closed, one after its record was forgotten, a reconnection, and one session number on two nodes.
 
 **CI4 - Certainty is never inferred.**\
 A record's `proved` is `true` only for a principal the transport's own proof established - AGP's evidence of a verified peer - or a verifier the host supplied established (`verified-principal`, outside Delta 1); no rule, default or later step turns an asserted principal into a proved one, and a record's `kind` says what produced it, so a later kind of evidence is a new variant of the record rather than a change to this one.\
@@ -127,7 +129,7 @@ Evidence reaches it through the transport's own reports and verifiers the host s
 
 **Consumes, through a declared contract:**
 
-- `agp`: `peer-identity-evidence`, `delivery-context`
+- `agp`: `peer-identity-evidence`, `delivery-context`, `read-only-observation`
 
 **Composed-by:** nothing yet.\
 Its first consumer, once built, is zorg's hub, which supplies AGP's admission check through it and gives operation-call's host half the evidence of each request.
