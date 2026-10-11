@@ -629,6 +629,82 @@ test("CI2: the admission port answers within the deadline the host gives: a ruli
 	}
 });
 
+test("CI2: a ruling's answer is judged by when it comes on the clock port: an allow or a rejection at or after the deadline is a denial with code POLICY whether its answer or the deadline's timer runs first, and records nothing; an answer just before the deadline is taken", async () => {
+	const DEADLINE = 10_000;
+	const request = (session) => ({ localNodeId: "hub", remoteNodeId: "alice.1", localSessionId: session, remoteSessionId: "000009", direction: "inbound", peerEvidence: { locality: "network", protection: "none", authentication: { kind: "none" } } });
+	const tick = () => new Promise((resolve) => setImmediate(resolve));
+	const outcome = (promise) => promise.then((value) => ({ value }), (error) => ({ error }));
+	let n = 0;
+	/** Asks a ruling that answers `how` when the clock reads START + `at`, the timer first or the answer first. */
+	async function ask({ at, how, timerFirst }) {
+		const clock = new ManualClock(START);
+		let answer;
+		const ruling = { evaluate: () => new Promise((resolve, reject) => { answer = { resolve, reject }; }) };
+		let applied = 0;
+		const rule = { apply: (r) => { applied += 1; return assertedNodeRule.apply(r); } };
+		const identity = createCallerIdentity({ rule, clock, admission: ruling, admissionDeadlineMs: DEADLINE });
+		const session = String(++n).padStart(6, "0");
+		const pending = outcome(identity.admission.evaluate(request(session)));
+		await tick();
+		if (timerFirst) {
+			// The deadline's timer runs, late, at the answer's time, and only then the answer comes.
+			clock.setTime(START + at);
+			clock.runDue();
+		} else {
+			// The clock passes the deadline with its timer still queued; the answer's callback runs first.
+			clock.setTime(START + at);
+		}
+		if (how === "allow") answer.resolve({ decision: "allow" });
+		else answer.reject(new Error("the ruling failed"));
+		await tick();
+		clock.runDue();
+		await tick();
+		return { session, result: await pending, record: identity.sessionPrincipal("alice.1", session), applied, pendingTimers: clock.pending() };
+	}
+	for (const how of ["allow", "reject"]) {
+		for (const timerFirst of [false, true]) {
+			for (const at of [DEADLINE, DEADLINE + 1, 25_000]) {
+				const seen = await ask({ at, how, timerFirst });
+				const label = `${how} at +${at}, ${timerFirst ? "timer first" : "answer first"}`;
+				assert.deepEqual(seen.result, { value: { decision: "deny", reasonCode: "POLICY" } }, label);
+				assert.equal(seen.record, null, `${label}: nothing recorded`);
+				assert.equal(seen.applied, 0, `${label}: no rule applied`);
+				assert.deepEqual(seen.pendingTimers, [], `${label}: no timer left`);
+			}
+		}
+	}
+	// Just before the deadline, the answer is the ruling's: an allow is taken and recorded, a rejection refuses.
+	const taken = await ask({ at: DEADLINE - 1, how: "allow", timerFirst: false });
+	assert.deepEqual(taken.result, { value: { decision: "allow" } });
+	assert.equal(taken.applied, 1);
+	assert.deepEqual(taken.record, record("alice.1", taken.session, "alice"));
+	assert.deepEqual(taken.pendingTimers, [], "an answer in time cancels the deadline");
+	const refused = await ask({ at: DEADLINE - 1, how: "reject", timerFirst: false });
+	assert.match(String(refused.result.error), /the ruling failed/);
+	assert.equal(refused.record, null);
+});
+
+test("CI2: on the default clock, an asynchronous ruling that answers only after a short deadline is denied with code POLICY and records nothing", async () => {
+	const deadline = 20;
+	let entered;
+	let answered;
+	const ruling = {
+		async evaluate() {
+			entered = performance.now();
+			await Promise.resolve();
+			// A busy host: the answer's continuation runs before the deadline's timer can.
+			while (performance.now() - entered < 50) { /* busy */ }
+			answered = performance.now();
+			return { decision: "allow" };
+		},
+	};
+	const identity = createCallerIdentity({ rule: assertedNodeRule, admission: ruling, admissionDeadlineMs: deadline });
+	const result = await identity.admission.evaluate({ localNodeId: "hub", remoteNodeId: "alice.1", localSessionId: "000001", remoteSessionId: "000009", direction: "inbound", peerEvidence: { locality: "network", protection: "none", authentication: { kind: "none" } } });
+	assert.ok(answered - entered >= 50, "the ruling answered after its deadline");
+	assert.deepEqual(result, { decision: "deny", reasonCode: "POLICY" });
+	assert.equal(identity.sessionPrincipal("alice.1", "000001"), null);
+});
+
 // CI2 - a snapshot that cannot be read, and stopping twice.
 
 test("CI2, E18: a snapshot that throws is reported to the diagnostic port and keeps every record; read again, the record is forgotten by the first readable sweep 60 seconds after absence was first seen", async (t) => {

@@ -148,20 +148,33 @@ class Instance implements CallerIdentity {
 	 * The host's ruling, answered within the admission deadline (CI2): a ruling that has not answered by then
 	 * is taken as a denial with code POLICY, so AGP is never left awaiting it - AGP releases a connection only
 	 * once its admission settles - and its later answer, whatever it is, is ignored and records nothing. A
-	 * ruling that throws or rejects first refuses the session, as AGP treats a faulted admission.
+	 * ruling that throws or rejects in time refuses the session, as AGP treats a faulted admission.
+	 *
+	 * An answer is judged by when it comes on the clock port, not by which callback runs first: an answer,
+	 * allow, deny or rejection, that comes at or after the deadline is the POLICY denial, even if it runs
+	 * before the deadline's timer. The timer remains for a ruling that never answers.
 	 */
 	#ruleWithin(ruling: IdentityAdmissionPort, request: IdentityAdmissionRequest): Promise<IdentityAdmissionResult> {
 		return new Promise<IdentityAdmissionResult>((resolve, reject) => {
 			let settled = false;
+			// The absolute deadline on the clock port, captured as admission begins.
+			const deadlineAt = this.#clock.now() + this.#deadlineMs;
 			const deadline = this.#clock.schedule(this.#deadlineMs, () => {
 				if (settled) return;
 				settled = true;
 				resolve(DEADLINE_DENIAL);
 			});
 			const answer = (settle: () => void): void => {
+				// After the decision, any settlement is ignored; it was consumed by the handlers below.
 				if (settled) return;
 				settled = true;
 				deadline.cancel();
+				// Equality convention: an answer at the deadline is late. An answer only counts if it comes
+				// strictly before deadlineAt; otherwise it is the POLICY denial, and no rule runs, nothing is recorded.
+				if (this.#clock.now() >= deadlineAt) {
+					resolve(DEADLINE_DENIAL);
+					return;
+				}
 				settle();
 			};
 			let ruled: Promise<IdentityAdmissionResult>;
