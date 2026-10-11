@@ -48,7 +48,7 @@ Issuing credentials - drawv2's connection codes among them, and the admission ke
 
 **Maturity: provisional**, designed under zorg's Delta 1, amendment 2, and zorg's rulings `D26`, `D31`, `D35` and `D37`.\
 Each declaration names the exit criterion of zorg's `docs/DELTAS/DELTA-1.md` that proves it and the test that exercises it.\
-AGP's evidence, admission port and delivery context are those of AGP at `1723c9d` (zorg's `D42`).
+AGP's evidence, admission port and delivery context are those of AGP at `f16266a` (zorg's `D42`).
 
 **CI1 - A host's rule.**\
 A host gives caller-identity a rule that turns a session's evidence into a principal or into none: a port whose `apply`, given AGP's identity-admission request, returns at once `{principal, proved}` or `null`; a rule that throws, or returns anything else, refuses the session, and nothing is recorded.\
@@ -80,7 +80,7 @@ Tested by: `E18`, in `test/contract/request-evidence.test.js`, with the injected
 
 **CI4 - Certainty is never inferred.**\
 A record's `proved` is `true` only for a principal the transport's own proof established - AGP's evidence of a verified peer - or a verifier the host supplied established (`verified-principal`, outside Delta 1); the component records `proved` `true` only when the rule claims it for exactly the principal AGP's evidence verified - `authentication.kind` `verified` and the rule's principal equal to `authentication.principal` - and records any other principal asserted, a principal a rule derives from the verified one included, since a mapping of proof to another principal is `verified-principal`'s, outside Delta 1; no rule, default or later step turns an asserted principal into a proved one, and a record's `kind` says what produced it, so a later kind of evidence is a new variant of the record rather than a change to this one.\
-Tested by: `E18`, in `test/contract/request-evidence.test.js`, which checks that every record produced under trusted-development security has `proved` `false`, and, against AGP's production in-process carrier, whose evidence verifies a transport principal, that a rule claiming proof for that principal itself is recorded proved, one claiming proof for another name over the same evidence is recorded asserted, and one claiming proof over evidence with no authentication is recorded asserted.
+Tested by: `E18`, in `test/contract/request-evidence.test.js`, which checks that every record produced under trusted-development security has `proved` `false`, and, against AGP's production in-process carrier, whose evidence verifies a transport principal, that a rule claiming proof for that principal itself is recorded proved, one claiming proof for another name over the same evidence is recorded asserted, and one claiming proof over a session whose evidence reports no authentication - the carrier's accepted channels relabelled to report what trusted-development WebSocket security reports, since the in-process carrier always reports a verified peer - is recorded asserted.
 
 **CI5 - What zorg composes.**\
 The hub of zorg gives caller-identity the asserted node rule, supplies its admission port to the hub's AGP node, and gives operation-call's host half its answer for each request as that request's evidence; zorg's own use of the record - the writer it names and the policy it applies - is zorg's `EM13`.\
