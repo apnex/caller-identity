@@ -2,7 +2,7 @@
 
 Establish the principal each request comes from, from the evidence its caller presented and the host's rules.
 
-**Status: built at zorg's Delta 1, stage 4b, and awaiting its verification.**\
+**Status: built, and certified at zorg's Delta 1, stage 4b, at `bb240c6`.**\
 Its vision is ratified (zorg's `D43`), and its contract's design is certified at zorg's Delta 1, amendment 2.\
 Its contract tests run a host over AGP's production in-process carrier, with an injected clock port driving the sweeps, for `session-principal` and `request-evidence`; `verified-principal` is left out of Delta 1 (zorg's `D37`).
 
