@@ -10,7 +10,7 @@ export interface Cancellable {
 
 /**
  * The host's clock: `now` is monotonic milliseconds, by default `performance.now()`; `schedule` runs a
- * callback once, no sooner than it can, after a delay in those milliseconds, by default with `setTimeout`.
+ * callback once, after a delay in those milliseconds has passed on `now`, by default with `setTimeout`.
  * The component reads no other clock: every time it records and every sweep it runs comes from this port.
  */
 export interface ClockPort {
@@ -24,7 +24,19 @@ export const defaultClock: ClockPort = Object.freeze({
 		return performance.now();
 	},
 	schedule(delayMs: number, callback: () => void): Cancellable {
-		const handle = setTimeout(callback, delayMs);
+		// setTimeout can run before its delay has passed on performance.now(); a wakeup is not the delay's end.
+		// Each wakeup reads the clock and, if early, waits again for the time remaining, rounded up.
+		const dueAt = performance.now() + delayMs;
+		let handle: ReturnType<typeof setTimeout>;
+		const wake = (): void => {
+			const now = performance.now();
+			if (now < dueAt) {
+				handle = setTimeout(wake, Math.ceil(dueAt - now));
+				return;
+			}
+			callback();
+		};
+		handle = setTimeout(wake, delayMs);
 		return Object.freeze({
 			cancel(): void {
 				clearTimeout(handle);

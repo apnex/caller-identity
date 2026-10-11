@@ -705,6 +705,130 @@ test("CI2: on the default clock, an asynchronous ruling that answers only after 
 	assert.equal(identity.sessionPrincipal("alice.1", "000001"), null);
 });
 
+test("CI2: a timer wakeup is not the deadline: with a clock whose timer fires early, again and again, the port reads the clock and waits for the time remaining, so an allow or a rejection just before the deadline is the ruling's, and a ruling that never answers is denied only once the clock shows the deadline passed", async () => {
+	const DEADLINE = 10_000;
+	const request = (session) => ({ localNodeId: "hub", remoteNodeId: "alice.1", localSessionId: session, remoteSessionId: "000009", direction: "inbound", peerEvidence: { locality: "network", protection: "none", authentication: { kind: "none" } } });
+	const settled = (promise) => { const state = { done: false }; promise.then((v) => Object.assign(state, { done: true, value: v }), (e) => Object.assign(state, { done: true, error: e })); return state; };
+	const tick = () => new Promise((resolve) => setImmediate(resolve));
+	const make = () => {
+		const clock = new ManualClock(START);
+		const delays = [];
+		// A scheduler that wakes at half the delay it was asked for, every time.
+		const early = { now: () => clock.now(), schedule: (delay, run) => { delays.push(delay); return clock.schedule(delay / 2, run); } };
+		const answers = [];
+		const ruling = { evaluate: () => new Promise((resolve, reject) => answers.push({ resolve, reject })) };
+		const identity = createCallerIdentity({ rule: assertedNodeRule, clock: early, admission: ruling, admissionDeadlineMs: DEADLINE });
+		return { clock, delays, answers, identity };
+	};
+	// An allow just before the deadline, after many early wakeups, is taken.
+	{
+		const { clock, delays, answers, identity } = make();
+		const allowed = settled(identity.admission.evaluate(request("000001")));
+		clock.advanceTo(START + DEADLINE - 1);
+		await tick();
+		assert.equal(allowed.done, false, "an early wakeup denies nothing");
+		assert.ok(delays.length > 2, "each early wakeup waits again");
+		assert.ok(delays.every((d) => Number.isInteger(d) && d > 0), "for the time remaining, rounded up");
+		answers[0].resolve({ decision: "allow" });
+		await tick();
+		assert.deepEqual(allowed.value, { decision: "allow" });
+		assert.deepEqual(identity.sessionPrincipal("alice.1", "000001"), record("alice.1", "000001", "alice"));
+		assert.deepEqual(clock.pending(), [], "an answer in time cancels the deadline's current timer");
+	}
+	// A rejection just before the deadline refuses the session, as a faulted admission.
+	{
+		const { clock, answers, identity } = make();
+		const faulted = settled(identity.admission.evaluate(request("000002")));
+		clock.advanceTo(START + DEADLINE - 0.25);
+		await tick();
+		assert.equal(faulted.done, false);
+		answers[0].reject(new Error("the ruling failed"));
+		await tick();
+		assert.match(String(faulted.error), /the ruling failed/);
+		assert.deepEqual(clock.pending(), []);
+	}
+	// A ruling that never answers is denied at the deadline on the clock, not at an early wakeup.
+	{
+		const { clock, answers, identity } = make();
+		const late = settled(identity.admission.evaluate(request("000003")));
+		clock.advanceTo(START + DEADLINE - 0.25);
+		await tick();
+		assert.equal(late.done, false, "not before the deadline");
+		clock.advanceTo(START + DEADLINE);
+		await tick();
+		assert.deepEqual(late.value, { decision: "deny", reasonCode: "POLICY" });
+		assert.deepEqual(clock.pending(), []);
+		answers[0].resolve({ decision: "allow" });
+		await tick();
+		assert.equal(identity.sessionPrincipal("alice.1", "000003"), null, "the late answer records nothing");
+	}
+});
+
+test("CI2: on the default clock, whose timer can wake before its delay has passed on performance.now(), an asynchronous ruling that answers just before a short integer deadline is taken", async () => {
+	const deadline = 20;
+	const realSetTimeout = globalThis.setTimeout;
+	let wakeups = 0;
+	// The runtime's timer, made to wake early: at a quarter of its delay, rounded down.
+	globalThis.setTimeout = (callback, delay, ...args) => realSetTimeout(() => { wakeups += 1; callback(...args); }, Math.floor(delay / 4));
+	let timely = 0;
+	try {
+		for (let trial = 1; trial <= 40 && timely < 5; trial += 1) {
+			let observed;
+			let wokenBefore;
+			const ruling = {
+				evaluate() {
+					const work = (async () => {
+						const entered = performance.now();
+						while (performance.now() - entered < deadline - 5) await new Promise((resolve) => setImmediate(resolve));
+						return { decision: "allow" };
+					})();
+					// Registered before caller-identity's own handler, so it observes the answer first.
+					work.then(() => { observed = performance.now(); wokenBefore = wakeups; });
+					return work;
+				},
+			};
+			const identity = createCallerIdentity({ rule: assertedNodeRule, admission: ruling, admissionDeadlineMs: deadline });
+			const session = String(trial).padStart(6, "0");
+			wakeups = 0;
+			// The port captures its deadline after this timestamp: an answer observed before before + deadline is in time.
+			const before = performance.now();
+			const result = await identity.admission.evaluate({ localNodeId: "hub", remoteNodeId: "alice.1", localSessionId: session, remoteSessionId: "000009", direction: "inbound", peerEvidence: { locality: "network", protection: "none", authentication: { kind: "none" } } });
+			// A trial counts when the deadline's timer woke early, before the answer, and the answer came in
+			// time; on a host too slow for either, the trial shows nothing about an early wakeup.
+			if (wokenBefore < 1 || observed - before >= deadline) continue;
+			timely += 1;
+			assert.deepEqual(result, { decision: "allow" }, `trial ${trial}: answered ${observed - before} ms after the start of a ${deadline} ms deadline`);
+			assert.deepEqual(identity.sessionPrincipal("alice.1", session), record("alice.1", session, "alice"));
+		}
+	} finally {
+		globalThis.setTimeout = realSetTimeout;
+	}
+	assert.ok(timely > 0, "at least one ruling answered before its deadline, after an early wakeup");
+});
+
+test("CI2: a sweep timer that wakes early, again and again, waits again for the time remaining, rounded up, and each sweep runs only at its time on the clock", () => {
+	const start = START + 0.25;
+	const clock = new ManualClock(start);
+	const delays = [];
+	// A scheduler that wakes at half the delay it was asked for, every time.
+	const early = { now: () => clock.now(), schedule: (delay, run) => { delays.push(delay); return clock.schedule(delay / 2, run); } };
+	const identity = createCallerIdentity({ rule: assertedNodeRule, clock: early });
+	const reads = [];
+	identity.start({ connections: () => { reads.push(clock.now()); return { items: [] }; } });
+	clock.advanceTo(start + SWEEP - 0.25);
+	assert.deepEqual(reads, [], "no sweep before 30 seconds by the clock");
+	assert.ok(delays.length > 2, "each early wakeup waits again");
+	assert.ok(delays.every((d) => Number.isInteger(d) && d > 0), "for the time remaining, rounded up");
+	clock.advanceTo(start + SWEEP);
+	assert.deepEqual(reads, [start + SWEEP], "the first sweep at its time");
+	clock.advanceTo(start + 2 * SWEEP - 0.25);
+	assert.deepEqual(reads, [start + SWEEP], "no second sweep before its time");
+	clock.advanceTo(start + 2 * SWEEP);
+	assert.deepEqual(reads, [start + SWEEP, start + 2 * SWEEP]);
+	identity.stop();
+	assert.deepEqual(clock.pending(), []);
+});
+
 // CI2 - a snapshot that cannot be read, and stopping twice.
 
 test("CI2, E18: a snapshot that throws is reported to the diagnostic port and keeps every record; read again, the record is forgotten by the first readable sweep 60 seconds after absence was first seen", async (t) => {

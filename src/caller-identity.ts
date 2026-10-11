@@ -159,11 +159,21 @@ class Instance implements CallerIdentity {
 			let settled = false;
 			// The absolute deadline on the clock port, captured as admission begins.
 			const deadlineAt = this.#clock.now() + this.#deadlineMs;
-			const deadline = this.#clock.schedule(this.#deadlineMs, () => {
+			// A timer wakeup is not an event: on each, the clock is read, and only once it shows the deadline
+			// passed is the ruling denied. A timer that runs early is scheduled again for the time remaining,
+			// rounded up, so the answer's path and the timer's both judge by the clock alone.
+			let deadline: Cancellable;
+			const wake = (): void => {
 				if (settled) return;
+				const now = this.#clock.now();
+				if (now < deadlineAt) {
+					deadline = this.#clock.schedule(Math.ceil(deadlineAt - now), wake);
+					return;
+				}
 				settled = true;
 				resolve(DEADLINE_DENIAL);
-			});
+			};
+			deadline = this.#clock.schedule(this.#deadlineMs, wake);
 			const answer = (settle: () => void): void => {
 				// After the decision, any settlement is ignored; it was consumed by the handlers below.
 				if (settled) return;
@@ -228,7 +238,7 @@ class Instance implements CallerIdentity {
 		const now = this.#clock.now();
 		if (now < this.#due) {
 			// The scheduler ran early by the clock; a sweep runs only once 30 seconds have passed by it.
-			this.#schedule(this.#due - now);
+			this.#schedule(Math.ceil(this.#due - now));
 			return;
 		}
 		let snapshot;
