@@ -5,7 +5,8 @@
 // gets exactly {"kind": "agp-session", "node", "principal", "proved"}: the origin node always, and the
 // principal recorded for the session it arrived on only when the origin is that session's peer. Every record
 // produced under trusted-development security - the asserted node rule - has proved false, though this
-// carrier's own evidence reports a verified peer.
+// carrier's own evidence reports a verified peer; a rule claiming proof is recorded proved only for exactly the
+// transport principal that evidence verified.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { assertedNodeRule, createCallerIdentity } from "@apnex/caller-identity";
@@ -179,6 +180,64 @@ test("CI3, E18: one session number on two nodes: each node's requests find its o
 	clock.advanceTo(sweep(4));
 	assertRecord(ask(fromAlice.delivery), "alice.1", null);
 	assertRecord(ask(fromBob.delivery), "bob.1", "bob");
+});
+
+// CI4 over the carrier, with rules that claim proof. These records are not trusted-development security's,
+// so they stay out of `produced`.
+
+/** Asserts the whole record with the certainty given. */
+function assertCertainty(actual, node, principal, proved) {
+	assert.deepEqual(Object.keys(actual), ["kind", "node", "principal", "proved"]);
+	assert.deepEqual(actual, { kind: "agp-session", node, principal, proved });
+	assert.ok(Object.isFrozen(actual));
+}
+
+/** A host whose rule claims proof, and the transport evidence AGP gave its admission port, by peer node. */
+async function claimingHost(t, rule, options = {}) {
+	const fabric = newFabric();
+	const evidenceOf = new Map();
+	const ruling = { async evaluate(r) { evidenceOf.set(r.remoteNodeId, r.peerEvidence); return { decision: "allow" }; } };
+	const host = await startHost(fabric, { clock: new ManualClock(START), rule, ruling, ...options });
+	const parts = [host];
+	t.after(() => stopAll(...parts));
+	const peer = async (name) => {
+		const node = await startPeer(fabric, name);
+		parts.push(node);
+		return node;
+	};
+	return { host, peer, evidenceOf };
+}
+
+test("CI4, E18: over the in-process carrier, a rule claiming proof for exactly the transport principal AGP's evidence verified is recorded proved; claiming it for another name, a derived one included, is recorded asserted", async (t) => {
+	const claims = {
+		"same.1": (verified) => verified,
+		"alice.1": () => "alice",
+		"derived.1": (verified) => `${verified}-derived`,
+		"upper.1": (verified) => verified.toUpperCase(),
+	};
+	const rule = { apply: (r) => ({ principal: claims[r.remoteNodeId](r.peerEvidence.authentication.principal), proved: true }) };
+	const { host, peer, evidenceOf } = await claimingHost(t, rule);
+	for (const [name, claim] of Object.entries(claims)) {
+		const node = await peer(name);
+		const { delivery, evidence } = await request(host, node);
+		const authentication = evidenceOf.get(name).authentication;
+		assert.equal(authentication.kind, "verified", "the carrier's evidence verifies a transport principal");
+		assert.match(authentication.principal, /^t-\d+$/);
+		const principal = claim(authentication.principal);
+		const proved = name === "same.1";
+		assertCertainty(evidence, name, principal, proved);
+		assert.deepEqual(host.identity.sessionPrincipal(name, delivery.ingressSessionId), { node: name, session: delivery.ingressSessionId, principal, proved });
+	}
+});
+
+test("CI4, E18: over a session whose evidence reports no authentication, a rule claiming proof is recorded asserted", async (t) => {
+	const none = Object.freeze({ locality: "network", protection: "none", authentication: Object.freeze({ kind: "none" }) });
+	const rule = { apply: (r) => ({ principal: r.remoteNodeId.split(".")[0], proved: true }) };
+	const { host, peer, evidenceOf } = await claimingHost(t, rule, { peerEvidence: none });
+	const { delivery, evidence } = await request(host, await peer("alice.1"));
+	assert.deepEqual(evidenceOf.get("alice.1"), none, "AGP gave the admission port evidence with no authentication");
+	assertCertainty(evidence, "alice.1", "alice", false);
+	assert.equal(host.identity.sessionPrincipal("alice.1", delivery.ingressSessionId).proved, false);
 });
 
 test("CI4: a rule cannot make a principal proved over evidence that proved nothing; the kind names what produced the record", async () => {

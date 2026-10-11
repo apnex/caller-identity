@@ -32,14 +32,45 @@ export interface ConnectionSource {
 	connections(): ConnectionListSnapshot;
 }
 
+/**
+ * A sweep whose connection snapshot could not be read (CI2): it changed no record, and so may keep records
+ * longer than the bound of 60 to 90 seconds after a close, for as long as the snapshot cannot be read.
+ */
+export interface SnapshotUnreadable {
+	readonly kind: "snapshot-unreadable";
+	/** When the sweep ran, by the host's clock port. */
+	readonly at: number;
+	/** What reading the snapshot threw. */
+	readonly error: unknown;
+}
+
+/** Everything caller-identity reports to a host's diagnostic port; `kind` says which. */
+export type CallerIdentityDiagnostic = SnapshotUnreadable;
+
+/**
+ * A host's diagnostic port (CI2): told of each failure that lengthens how long records are kept. A report
+ * that throws is ignored, so a broken port never stops the sweeping.
+ */
+export interface DiagnosticPort {
+	report(diagnostic: CallerIdentityDiagnostic): void;
+}
+
 /** What caller-identity is created with. */
 export interface CallerIdentityOptions {
 	/** The host's rule; none is built in, and `assertedNodeRule` is the one the component offers. */
 	readonly rule: SessionRule;
 	/** The host's own admission ruling; absent, every peer is admitted. */
 	readonly admission?: IdentityAdmissionPort;
+	/**
+	 * How long, in milliseconds on the clock port, the admission port waits for the host's admission ruling
+	 * before it answers AGP with a denial, code `POLICY` (CI2); absent, 10000, AGP's default opening
+	 * time-out. A host gives the same value as its node's opening time-out.
+	 */
+	readonly admissionDeadlineMs?: number;
 	/** The host's clock; absent, `performance.now()` and `setTimeout`. */
 	readonly clock?: ClockPort;
+	/** The host's diagnostic port; absent, failures that lengthen retention are reported nowhere. */
+	readonly diagnostic?: DiagnosticPort;
 }
 
 /** The principal recorded for one session, and how it was established. */

@@ -11,9 +11,12 @@ export type { Cancellable, ClockPort } from "./clock.js";
 export type {
 	AgpSessionEvidence,
 	CallerIdentity,
+	CallerIdentityDiagnostic,
 	CallerIdentityOptions,
 	ConnectionSource,
 	DeliveryEvidenceInput,
+	DiagnosticPort,
+	SnapshotUnreadable,
 	RequestEvidence,
 	RuledPrincipal,
 	SessionPrincipal,

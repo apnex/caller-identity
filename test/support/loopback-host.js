@@ -73,16 +73,57 @@ function transport(fabric, name, { listen, targets = [] }) {
 	});
 }
 
+/**
+ * The hub's port of the in-process carrier, with every channel it accepts reporting `peerEvidence` in place of
+ * the carrier's own; packets still cross the carrier. Trusted-development WebSocket security reports no
+ * authentication, which the in-process carrier never does, so this is how a test puts that evidence before
+ * AGP's admission of a real session.
+ */
+function reportingEvidence(port, peerEvidence) {
+	const relabel = (channel) => Object.freeze({
+		peerEvidence,
+		...(channel.sendAwaitsReceiverCapacity === undefined ? {} : { sendAwaitsReceiverCapacity: channel.sendAwaitsReceiverCapacity }),
+		send: (packet, signal) => channel.send(packet, signal),
+		read: (signal) => channel.read(signal),
+		close: (intent, signal) => channel.close(intent, signal),
+		abort: (intent) => channel.abort(intent),
+	});
+	return {
+		resolveTarget: (reference) => port.resolveTarget(reference),
+		resolveListener(reference) {
+			const capability = port.resolveListener(reference);
+			if (capability === undefined) return undefined;
+			return {
+				listen: (options, callbacks, signal) => capability.listen(options, {
+					accept: (value) => callbacks.accept({ ...value, channel: relabel(value.channel) }),
+					capacityRejected: (kind) => callbacks.capacityRejected(kind),
+				}, signal),
+			};
+		},
+	};
+}
+
 const timers = (openTimeoutMs) => ({ holdTimeMs: 0, openTimeoutMs, routeAckTimeoutMs: 2_000 });
 const noReconnect = { enabled: false, initialDelayMs: 5, maximumDelayMs: 50, multiplier: 2, jitterRatio: 0 };
 
 /**
  * Starts the host: an AGP node named "hub" listening on the fabric, composing caller-identity with the
  * asserted node rule and the given clock, serving SERVICE, and recording each request with its evidence.
- * `dial` names addresses the hub itself dials, each with the node it expects there.
+ * `dial` names addresses the hub itself dials, each with the node it expects there. `sweepSource` wraps the
+ * node's operations reader the sweeps are given, so a test can make the snapshot unreadable; `peerEvidence`
+ * replaces the carrier's evidence on every channel the hub accepts.
  */
-export async function startHost(fabric, { clock, rule = assertedNodeRule, sessionIds = [], ruling, gate, openTimeoutMs = 2_000, dial = [], agpClock } = {}) {
-	const identity = createCallerIdentity({ rule, clock, ...(ruling === undefined ? {} : { admission: ruling }) });
+export async function startHost(fabric, {
+	clock, rule = assertedNodeRule, sessionIds = [], ruling, gate, openTimeoutMs = 2_000, dial = [], agpClock,
+	admissionDeadlineMs, diagnostic, sweepSource = (operations) => operations, peerEvidence,
+} = {}) {
+	const identity = createCallerIdentity({
+		rule,
+		clock,
+		...(ruling === undefined ? {} : { admission: ruling }),
+		...(admissionDeadlineMs === undefined ? {} : { admissionDeadlineMs }),
+		...(diagnostic === undefined ? {} : { diagnostic }),
+	});
 	const ids = new ScriptedIds(sessionIds);
 	const admission = gate === undefined ? identity.admission : {
 		async evaluate(request) {
@@ -100,7 +141,9 @@ export async function startHost(fabric, { clock, rule = assertedNodeRule, sessio
 		identityAdmission: { mode: "port" },
 		timers: timers(openTimeoutMs),
 	}, {
-		transport: transport(fabric, HUB, { listen: HUB, targets: dial.map((d) => d.address) }),
+		transport: peerEvidence === undefined
+			? transport(fabric, HUB, { listen: HUB, targets: dial.map((d) => d.address) })
+			: reportingEvidence(transport(fabric, HUB, { listen: HUB, targets: dial.map((d) => d.address) }), peerEvidence),
 		identityAdmission: admission,
 		ids,
 		...(agpClock === undefined ? {} : { clock: agpClock }),
@@ -111,13 +154,21 @@ export async function startHost(fabric, { clock, rule = assertedNodeRule, sessio
 		requests.push({ payload, delivery: context.delivery, evidence: identity.evidence(context.delivery) });
 	});
 	await node.expose("hub-client", () => {});
+	// AGP's operational events, for a test to observe AGP refusing a session before its identity was committed.
+	const events = [];
+	const subscription = node.operations.events();
+	(async () => { for await (const event of subscription) events.push(event); })().catch(() => {});
 	await node.start();
-	identity.start(node.operations);
+	identity.start(sweepSource(node.operations));
 	return {
 		node,
 		identity,
 		ids,
 		requests,
+		events,
+		/** AGP's closing, before its identity was committed, of the connection under the hub's own `session`. */
+		refused: (session) => eventually(() => events.find((e) => e.kind === "connection.preidentity-closed" && e.data.localSessionId === session),
+			`AGP to refuse the connection under ${session}`),
 		/** The connection entries of the hub's snapshot. */
 		connections: () => node.operations.connections().items,
 		/** The hub's own session identifier for an established session with `peer`. */
@@ -132,6 +183,7 @@ export async function startHost(fabric, { clock, rule = assertedNodeRule, sessio
 		},
 		async stop() {
 			identity.stop();
+			subscription.close();
 			await node.stop({ drainTimeoutMs: 100 }).catch(() => {});
 		},
 	};

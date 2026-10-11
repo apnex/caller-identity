@@ -4,7 +4,9 @@
 // the asserted node rule to each peer's node name whatever that carrier's own evidence says, records for each
 // admitted session the asserted principal the rule gives, keyed by the peer's node and the host node's own
 // session identifier, and forgets it by sweeping AGP's connection snapshot every 30 seconds by an injected
-// clock port, never sooner than 60 seconds after the session closed.
+// clock port, never sooner than 60 seconds after the session closed. A rule that fails refuses its session; a
+// host ruling that never answers is denied at the admission deadline, so AGP releases its connection; and a
+// snapshot that cannot be read changes no record and is reported to the host's diagnostic port.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { assertedNodeRule, createCallerIdentity } from "@apnex/caller-identity";
@@ -74,6 +76,30 @@ for (const [name, principal, what] of [
 		assert.equal(request.peerEvidence.locality, "process-local");
 		assert.deepEqual(host.identity.sessionPrincipal(name, session), record(name, session, principal));
 		assert.equal(node.nodeId, name);
+	});
+}
+
+// CI1 - a rule that fails refuses the session.
+
+for (const [what, apply] of [
+	["throws", () => { throw new Error("the rule failed"); }],
+	["returns undefined, a malformed result", () => undefined],
+	["returns a string, a malformed result", () => "alice"],
+	["returns a principal that is not a string, a malformed result", () => ({ principal: 7, proved: false })],
+	["returns a certainty that is not a boolean, a malformed result", () => ({ principal: "alice", proved: "no" })],
+	["returns a promise", async () => ({ principal: "alice", proved: false })],
+]) {
+	test(`CI1, E18: over the in-process carrier, a rule that ${what} refuses the session: AGP refuses it and nothing is recorded`, async (t) => {
+		let applied = 0;
+		const rule = { apply: (request) => { applied += 1; return apply(request); } };
+		const { host, peer } = await setUp(t, { rule, sessionIds: ["00f00d"] });
+		await peer("alice.1");
+		const refusal = await host.refused("00f00d");
+		assert.equal(applied, 1, "the rule was asked once");
+		assert.equal(refusal.data.direction, "inbound");
+		assert.equal(refusal.data.reason, "INTERNAL_ERROR", "AGP refuses a session whose admission faulted");
+		assert.equal(host.connections().length, 0, "AGP holds no connection for it");
+		assert.equal(host.identity.sessionPrincipal("alice.1", "00f00d"), null, "nothing is recorded");
 	});
 }
 
@@ -339,16 +365,33 @@ test("CI2, E18: a key admitted again replaces its record, with the time of its n
 	gone(host, "alice.1", "00beef");
 });
 
-test("CI2: a key admitted again replaces the principal and certainty its record held", async () => {
-	const clock = new ManualClock(START);
+test("CI2, E18: a key admitted again replaces its record's principal and its certainty, both changed, from proved to asserted and back", async (t) => {
+	// Over the carrier, whose evidence verifies the peer's transport name: the first and third admissions claim
+	// proof for that verified principal itself, so are proved (CI4); the second gives the asserted node rule's.
 	let admissions = 0;
-	const rule = { apply: () => ({ principal: `principal-${++admissions}`, proved: false }) };
-	const identity = createCallerIdentity({ rule, clock });
-	const request = { localNodeId: "hub", remoteNodeId: "alice.1", localSessionId: "000001", remoteSessionId: "000009", direction: "inbound", peerEvidence: { locality: "network", protection: "none", authentication: { kind: "none" } } };
-	assert.deepEqual(await identity.admission.evaluate(request), { decision: "allow" });
-	assert.deepEqual(identity.sessionPrincipal("alice.1", "000001"), record("alice.1", "000001", "principal-1"));
-	await identity.admission.evaluate({ ...request, remoteSessionId: "00000a" });
-	assert.deepEqual(identity.sessionPrincipal("alice.1", "000001"), record("alice.1", "000001", "principal-2"));
+	const verified = [];
+	const rule = {
+		apply(request) {
+			admissions += 1;
+			verified.push(request.peerEvidence.authentication.principal);
+			return admissions === 2 ? assertedNodeRule.apply(request) : { principal: request.peerEvidence.authentication.principal, proved: true };
+		},
+	};
+	const { host, peer } = await setUp(t, { rule, sessionIds: ["00beef", "00beef", "00beef"] });
+	const held = () => host.identity.sessionPrincipal("alice.1", "00beef");
+	const first = await peer("alice.1");
+	assert.equal(await host.sessionWith("alice.1"), "00beef");
+	assert.match(verified[0], /^t-\d+$/, "the carrier verifies a transport principal");
+	assert.deepEqual(held(), { node: "alice.1", session: "00beef", principal: verified[0], proved: true });
+	await closePeer(host, first, "00beef");
+	const second = await peer("alice.1");
+	assert.equal(await host.sessionWith("alice.1"), "00beef");
+	assert.deepEqual(held(), { node: "alice.1", session: "00beef", principal: "alice", proved: false }, "principal and certainty both replaced");
+	await closePeer(host, second, "00beef");
+	await peer("alice.1");
+	assert.equal(await host.sessionWith("alice.1"), "00beef");
+	assert.notEqual(verified[2], verified[0], "a new transport, a new verified principal");
+	assert.deepEqual(held(), { node: "alice.1", session: "00beef", principal: verified[2], proved: true }, "replaced again, proved again");
 });
 
 test("CI2: a later sweep that finds the session present clears the absence noted, so the record is kept 60 seconds from when absence is next seen", async (t) => {
@@ -370,4 +413,169 @@ test("CI2: a later sweep that finds the session present clears the absence noted
 	found(host, "alice.1", "00d00d");
 	clock.advanceTo(sweep(6));
 	gone(host, "alice.1", "00d00d");
+});
+
+// CI2 - the admission deadline.
+
+test("CI2, E18: a host ruling that never answers is denied at the admission deadline, and another peer's record sharing that session identifier is then forgotten as any absent session's is", async (t) => {
+	let entered = false;
+	let answerLate;
+	const ruling = {
+		evaluate(request) {
+			if (request.remoteNodeId !== "bob.1") return Promise.resolve({ decision: "allow" });
+			entered = true;
+			return new Promise((resolve) => { answerLate = resolve; });
+		},
+	};
+	// No admission deadline is given: the default, 10 seconds on the clock port, applies.
+	const { clock, host, peer } = await setUp(t, { ruling, sessionIds: ["00abcd", "00abcd"], openTimeoutMs: 250 });
+	t.after(() => answerLate?.({ decision: "allow" }));
+	const alice = await peer("alice.1");
+	assert.equal(await host.sessionWith("alice.1"), "00abcd");
+	clock.advanceTo(sweep(1));
+	clock.advanceTo(sweep(1) + 1);
+	await closePeer(host, alice, "00abcd");
+	clock.advanceTo(sweep(2) - 1_000);
+	await peer("bob.1");
+	await eventually(() => entered, "bob's admission to reach the host's ruling");
+	// AGP's opening time-out ends bob's opening, but AGP keeps the connection pending while it awaits admission.
+	const expired = await eventually(() => host.connections().find((c) => c.identityState === "pending" && c.lastTransition.event === "OpenExpired"),
+		"AGP's opening time-out on bob's connection");
+	assert.equal(expired.localSessionId, "00abcd");
+	clock.advanceTo(sweep(2));
+	found(host, "alice.1", "00abcd");
+	clock.advanceTo(sweep(2) + 9_000 - 1);
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	assert.ok(present(host, "alice.1", "00abcd"), "before the deadline, AGP still awaits the ruling");
+	clock.advanceTo(sweep(2) + 9_000);
+	await eventually(() => host.connections().length === 0, "AGP to release bob's connection once the deadline denies it");
+	assert.equal((await host.refused("00abcd")).data.reason, "OpenExpired", "AGP reports the expired opening only once it releases the connection");
+	assert.equal(host.identity.sessionPrincipal("bob.1", "00abcd"), null, "a denied session is not recorded");
+	answerLate({ decision: "allow" });
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	assert.equal(host.identity.sessionPrincipal("bob.1", "00abcd"), null, "the ruling's late answer records nothing");
+	found(host, "alice.1", "00abcd");
+	clock.advanceTo(sweep(3));
+	clock.advanceTo(sweep(5) - 1);
+	found(host, "alice.1", "00abcd");
+	clock.advanceTo(sweep(5));
+	gone(host, "alice.1", "00abcd");
+});
+
+test("CI2: the admission port answers within the deadline the host gives: a ruling's answer in time is AGP's, one not answered by then is a denial with code POLICY", async () => {
+	const clock = new ManualClock(START);
+	const answers = [];
+	const ruling = { evaluate: () => new Promise((resolve, reject) => answers.push({ resolve, reject })) };
+	const identity = createCallerIdentity({ rule: assertedNodeRule, clock, admission: ruling, admissionDeadlineMs: 2_500 });
+	const request = (session) => ({ localNodeId: "hub", remoteNodeId: "alice.1", localSessionId: session, remoteSessionId: "000009", direction: "inbound", peerEvidence: { locality: "network", protection: "none", authentication: { kind: "none" } } });
+	const settled = (promise) => { const state = { done: false }; promise.then((v) => Object.assign(state, { done: true, value: v }), (e) => Object.assign(state, { done: true, error: e })); return state; };
+	const tick = () => new Promise((resolve) => setImmediate(resolve));
+	// Not answered by the deadline.
+	const late = settled(identity.admission.evaluate(request("000001")));
+	clock.advanceBy(2_499);
+	await tick();
+	assert.equal(late.done, false, "before the deadline, the port awaits the ruling");
+	clock.advanceBy(1);
+	await tick();
+	assert.deepEqual(late.value, { decision: "deny", reasonCode: "POLICY" });
+	answers[0].resolve({ decision: "allow" });
+	await tick();
+	assert.equal(identity.sessionPrincipal("alice.1", "000001"), null, "the late answer records nothing");
+	// Answered in time: the ruling's answer, and the deadline is cancelled.
+	const allowed = settled(identity.admission.evaluate(request("000002")));
+	assert.deepEqual(clock.pending(), [START + 2_500 + 2_500]);
+	answers[1].resolve({ decision: "allow" });
+	await tick();
+	assert.deepEqual(allowed.value, { decision: "allow" });
+	assert.deepEqual(clock.pending(), [], "an answer in time cancels the deadline");
+	assert.deepEqual(identity.sessionPrincipal("alice.1", "000002"), record("alice.1", "000002", "alice"));
+	// A ruling that rejects in time refuses the session, as AGP treats a faulted admission.
+	const faulted = settled(identity.admission.evaluate(request("000003")));
+	answers[2].reject(new Error("the ruling failed"));
+	await tick();
+	assert.match(String(faulted.error), /the ruling failed/);
+	assert.equal(identity.sessionPrincipal("alice.1", "000003"), null);
+	for (const admissionDeadlineMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, "10000"]) {
+		assert.throws(() => createCallerIdentity({ rule: assertedNodeRule, admissionDeadlineMs }), /admission deadline/);
+	}
+});
+
+// CI2 - a snapshot that cannot be read, and stopping twice.
+
+test("CI2, E18: a snapshot that throws is reported to the diagnostic port and keeps every record; read again, the record is forgotten by the first readable sweep 60 seconds after absence was first seen", async (t) => {
+	const failure = new Error("the snapshot cannot be read");
+	let broken = false;
+	const reports = [];
+	const diagnostic = { report: (d) => reports.push(d) };
+	const sweepSource = (operations) => ({ connections: () => { if (broken) throw failure; return operations.connections(); } });
+	const { clock, host, peer } = await setUp(t, { diagnostic, sweepSource, sessionIds: ["000a01", "000a02"] });
+	const alice = await peer("alice.1");
+	await peer("bob.1");
+	assert.equal(await host.sessionWith("alice.1"), "000a01");
+	assert.equal(await host.sessionWith("bob.1"), "000a02");
+	clock.advanceTo(sweep(1));
+	clock.advanceTo(sweep(1) + 1);
+	await closePeer(host, alice, "000a01");
+	clock.advanceTo(sweep(2));
+	// Absence of alice's session was first seen at sweep 2; on time, sweep 4 would forget it.
+	assert.deepEqual(reports, [], "a readable snapshot reports nothing");
+	broken = true;
+	clock.advanceTo(sweep(6));
+	assert.deepEqual(reports, [3, 4, 5, 6].map((k) => ({ kind: "snapshot-unreadable", at: sweep(k), error: failure })), "each failure is reported");
+	assert.ok(reports.every((r) => Object.isFrozen(r)));
+	found(host, "alice.1", "000a01");
+	found(host, "bob.1", "000a02");
+	assert.deepEqual(clock.pending(), [sweep(7)], "the sweeping goes on");
+	broken = false;
+	clock.advanceTo(sweep(7) - 1);
+	found(host, "alice.1", "000a01");
+	clock.advanceTo(sweep(7));
+	gone(host, "alice.1", "000a01");
+	found(host, "bob.1", "000a02");
+	assert.equal(reports.length, 4);
+});
+
+test("CI2: a diagnostic port that throws, or none, never stops the sweeping, and a snapshot that throws without one still changes no record", async () => {
+	for (const diagnostic of [undefined, { report: () => { throw new Error("the diagnostic port failed"); } }]) {
+		const clock = new ManualClock(START);
+		const identity = createCallerIdentity({ rule: assertedNodeRule, clock, ...(diagnostic === undefined ? {} : { diagnostic }) });
+		await identity.admission.evaluate({ localNodeId: "hub", remoteNodeId: "alice.1", localSessionId: "000001", remoteSessionId: "000009", direction: "inbound", peerEvidence: { locality: "network", protection: "none", authentication: { kind: "none" } } });
+		let broken = true;
+		let reads = 0;
+		identity.start({ connections: () => { reads += 1; if (broken) throw new Error("unreadable"); return { items: [] }; } });
+		clock.advanceTo(sweep(5));
+		assert.equal(reads, 5, "a sweep every 30 seconds, failures and all");
+		assert.deepEqual(identity.sessionPrincipal("alice.1", "000001"), record("alice.1", "000001", "alice"));
+		broken = false;
+		clock.advanceTo(sweep(8) - 1);
+		assert.ok(identity.sessionPrincipal("alice.1", "000001"), "absence first seen at sweep 6, the first readable one");
+		clock.advanceTo(sweep(8));
+		assert.equal(identity.sessionPrincipal("alice.1", "000001"), null);
+		identity.stop();
+	}
+	assert.throws(() => createCallerIdentity({ rule: assertedNodeRule, diagnostic: {} }), /diagnostic port/);
+});
+
+test("CI2, E18: the sweeping stopped twice: the second stop changes nothing, records stay readable, and it starts again", async (t) => {
+	const { clock, host, peer } = await setUp(t, { sessionIds: ["000b01"] });
+	const alice = await peer("alice.1");
+	assert.equal(await host.sessionWith("alice.1"), "000b01");
+	clock.advanceTo(sweep(1) + 1);
+	host.identity.stop();
+	assert.deepEqual(clock.pending(), [], "the first stop cancels the next sweep");
+	host.identity.stop();
+	assert.deepEqual(clock.pending(), [], "the second stop changes nothing");
+	found(host, "alice.1", "000b01");
+	await closePeer(host, alice, "000b01");
+	clock.advanceTo(sweep(10));
+	found(host, "alice.1", "000b01");
+	// Stopped, it is not sweeping, so it can be started again.
+	host.identity.start(host.node.operations);
+	assert.deepEqual(clock.pending(), [sweep(11)], "started again, the first sweep is 30 seconds later");
+	clock.advanceTo(sweep(11));
+	found(host, "alice.1", "000b01");
+	clock.advanceTo(sweep(13) - 1);
+	found(host, "alice.1", "000b01");
+	clock.advanceTo(sweep(13));
+	gone(host, "alice.1", "000b01");
 });
