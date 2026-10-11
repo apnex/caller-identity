@@ -35,7 +35,9 @@ export interface ConnectionSource {
 
 /**
  * A sweep whose connection snapshot could not be read (CI2): it changed no record, and so may keep records
- * longer than the bound of 60 to 90 seconds after a close, for as long as the snapshot cannot be read.
+ * longer than the bound of 60 to 90 seconds after a close, by every sweep at which the snapshot cannot be
+ * read - at least one sweep interval however brief the failure, since absence is noted, and a record
+ * forgotten, only at a sweep that reads the snapshot.
  */
 export interface SnapshotUnreadable {
 	readonly kind: "snapshot-unreadable";

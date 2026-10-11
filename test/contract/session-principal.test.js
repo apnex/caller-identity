@@ -22,8 +22,8 @@ const sweep = (k) => START + k * SWEEP;
 const record = (node, session, principal) => ({ node, session, principal, proved: false });
 
 /** A host on a fresh fabric, with a manual clock at START, stopped after the test. */
-async function setUp(t, { before, ...options } = {}) {
-	const clock = new ManualClock(START);
+async function setUp(t, { before, start = START, ...options } = {}) {
+	const clock = new ManualClock(start);
 	const fabric = newFabric();
 	const parts = [];
 	t.after(() => stopAll(...parts));
@@ -662,6 +662,64 @@ test("CI2, E18: a snapshot that throws is reported to the diagnostic port and ke
 	gone(host, "alice.1", "000a01");
 	found(host, "bob.1", "000a02");
 	assert.equal(reports.length, 4);
+});
+
+/** A host whose snapshot reader fails while `broken` is set, with the reader itself and its reports. */
+async function setUpBreakable(t, options) {
+	const reports = [];
+	const state = { broken: false, reader: undefined, reports };
+	const sweepSource = (operations) => (state.reader = {
+		connections: () => { if (state.broken) throw new Error("a brief snapshot failure"); return operations.connections(); },
+	});
+	const parts = await setUp(t, { start: 0, sweepSource, diagnostic: { report: (d) => reports.push(d.at) }, ...options });
+	return { ...parts, state };
+}
+
+test("CI2, E18: a failure of 2 milliseconds at the first sweep after a close delays the noting of absence by one sweep interval", async (t) => {
+	// The verifier's V8 schedule: started at 0, sweeps at 30,000, 60,000, 90,000 and so on.
+	const { clock, host, peer, state } = await setUpBreakable(t, { sessionIds: ["000c01"] });
+	const alice = await peer("alice.1");
+	assert.equal(await host.sessionWith("alice.1"), "000c01");
+	clock.advanceTo(30_000);
+	clock.advanceTo(30_001);
+	await closePeer(host, alice, "000c01");
+	clock.advanceTo(59_999);
+	state.broken = true;
+	clock.advanceTo(60_001);
+	state.broken = false;
+	assert.deepEqual(state.reports, [60_000], "the one failed sweep is reported");
+	assert.equal(state.reader.connections().items.length, 0, "the snapshot is readable again at 60,001, and shows the close");
+	// Without the failure, absence is noted at 60,000 and the record forgotten at 120,000; the failed sweep
+	// changed nothing, so absence is first noted at 90,000, one sweep interval later.
+	clock.advanceTo(120_003);
+	found(host, "alice.1", "000c01");
+	clock.advanceTo(149_999);
+	found(host, "alice.1", "000c01");
+	clock.advanceTo(150_000);
+	gone(host, "alice.1", "000c01");
+	assert.deepEqual(state.reports, [60_000]);
+});
+
+test("CI2, E18: a failure at the sweep where a record falls due forgets it at the next readable sweep", async (t) => {
+	const { clock, host, peer, state } = await setUpBreakable(t, { sessionIds: ["000c02"] });
+	const alice = await peer("alice.1");
+	assert.equal(await host.sessionWith("alice.1"), "000c02");
+	clock.advanceTo(30_000);
+	clock.advanceTo(30_001);
+	await closePeer(host, alice, "000c02");
+	// Absence is first noted at 60,000; the record falls due at the sweep at 120,000.
+	clock.advanceTo(119_999);
+	found(host, "alice.1", "000c02");
+	state.broken = true;
+	clock.advanceTo(120_001);
+	state.broken = false;
+	assert.deepEqual(state.reports, [120_000], "the failed sweep where the record fell due is reported");
+	found(host, "alice.1", "000c02");
+	clock.advanceTo(149_999);
+	found(host, "alice.1", "000c02");
+	clock.advanceTo(150_000);
+	gone(host, "alice.1", "000c02");
+	assert.deepEqual(state.reports, [120_000]);
 });
 
 test("CI2: a diagnostic port that throws, or none, never stops the sweeping, and a snapshot that throws without one still changes no record", async () => {

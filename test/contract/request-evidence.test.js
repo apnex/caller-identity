@@ -230,6 +230,60 @@ test("CI4, E18: over the in-process carrier, a rule claiming proof for exactly t
 	}
 });
 
+/** The principal and certainty of an evidence record, as a session record gives them. */
+const pick = ({ principal, proved }) => ({ principal, proved });
+
+test("CI1, CI4, E18: a rule whose result's principal is a getter giving a different name on a later read is never recorded proved for a name the transport did not verify", async (t) => {
+	// Each getter gives one name on its first read and another on every later one; a component that read the
+	// principal more than once could check one name and record the other.
+	const reads = new Map();
+	const getter = (name, first, later) => ({
+		get principal() { const n = (reads.get(name) ?? 0) + 1; reads.set(name, n); return n === 1 ? first : later; },
+		proved: true,
+	});
+	const results = {
+		// Gives "alice" first, the verified principal after: as the verifier's V11 rule did.
+		"late.1": (verified) => getter("late.1", "alice", verified),
+		// Gives the verified principal first, "alice" after.
+		"early.1": (verified) => getter("early.1", verified, "alice"),
+		// Ordinary controls: a plain result claiming proof for the verified principal, and for another name.
+		"same.1": (verified) => ({ principal: verified, proved: true }),
+		"other.1": () => ({ principal: "other", proved: true }),
+	};
+	const rule = { apply: (r) => results[r.remoteNodeId](r.peerEvidence.authentication.principal) };
+	const { host, peer, evidenceOf } = await claimingHost(t, rule);
+	const recorded = {};
+	for (const name of Object.keys(results)) {
+		const { delivery, evidence } = await request(host, await peer(name));
+		const authentication = evidenceOf.get(name).authentication;
+		assert.equal(authentication.kind, "verified");
+		assert.match(authentication.principal, /^t-\d+$/);
+		assert.deepEqual(host.identity.sessionPrincipal(name, delivery.ingressSessionId), { node: name, session: delivery.ingressSessionId, ...pick(evidence) });
+		if (evidence.proved) assert.equal(evidence.principal, authentication.principal, `${name}: proved only for the verified principal`);
+		recorded[name] = { verified: authentication.principal, evidence };
+	}
+	assert.equal(reads.get("late.1"), 1, "the principal is read once");
+	assert.equal(reads.get("early.1"), 1, "the principal is read once");
+	// The one value read is the one checked and the one recorded.
+	assertCertainty(recorded["late.1"].evidence, "late.1", "alice", false);
+	assertCertainty(recorded["early.1"].evidence, "early.1", recorded["early.1"].verified, true);
+	assertCertainty(recorded["same.1"].evidence, "same.1", recorded["same.1"].verified, true);
+	assertCertainty(recorded["other.1"].evidence, "other.1", "other", false);
+});
+
+test("CI1: a rule's result whose principal or proved cannot be read refuses the session, and nothing is recorded", async () => {
+	const admission = { localNodeId: "hub", remoteNodeId: "alice.1", localSessionId: "000001", remoteSessionId: "000002", direction: "inbound", peerEvidence: { locality: "process-local", protection: "none", authentication: { kind: "verified", principal: "alice" } } };
+	const failing = [
+		{ get principal() { throw new Error("principal unreadable"); }, proved: true },
+		{ principal: "alice", get proved() { throw new Error("proved unreadable"); } },
+	];
+	for (const result of failing) {
+		const identity = createCallerIdentity({ rule: { apply: () => result }, clock: new ManualClock(START) });
+		await assert.rejects(identity.admission.evaluate(admission), /unreadable/);
+		assert.equal(identity.sessionPrincipal("alice.1", "000001"), null);
+	}
+});
+
 test("CI4, E18: over a session whose evidence reports no authentication, a rule claiming proof is recorded asserted", async (t) => {
 	const none = Object.freeze({ locality: "network", protection: "none", authentication: Object.freeze({ kind: "none" }) });
 	const rule = { apply: (r) => ({ principal: r.remoteNodeId.split(".")[0], proved: true }) };

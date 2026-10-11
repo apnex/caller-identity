@@ -64,10 +64,15 @@ function ruled(rule: SessionRule, request: IdentityAdmissionRequest): { principa
 	const given: RuledPrincipal | null = rule.apply(request);
 	if (given === null) return { principal: null, proved: false };
 	if (consumedThenable(given)) throw new TypeError("a rule answers at once: a promise it returns is refused");
-	if (typeof given !== "object" || typeof given.principal !== "string" || typeof given.proved !== "boolean") {
+	if (typeof given !== "object") throw new TypeError("a rule gives null or { principal: string, proved: boolean }");
+	// CI1, CI4: each is read once, and the values read are the ones checked and recorded, so an accessor
+	// cannot give one principal to the check and another to the record. A read that throws refuses the session.
+	const principal: unknown = given.principal;
+	const claimed: unknown = given.proved;
+	if (typeof principal !== "string" || typeof claimed !== "boolean") {
 		throw new TypeError("a rule gives null or { principal: string, proved: boolean }");
 	}
-	return { principal: given.principal, proved: given.proved && provenBy(request, given.principal) };
+	return { principal, proved: claimed && provenBy(request, principal) };
 }
 
 /**
