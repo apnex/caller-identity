@@ -63,11 +63,34 @@ export function createCallerIdentity(options: CallerIdentityOptions): CallerIden
 function ruled(rule: SessionRule, request: IdentityAdmissionRequest): { principal: string | null; proved: boolean } {
 	const given: RuledPrincipal | null = rule.apply(request);
 	if (given === null) return { principal: null, proved: false };
+	if (consumedThenable(given)) throw new TypeError("a rule answers at once: a promise it returns is refused");
 	if (typeof given !== "object" || typeof given.principal !== "string" || typeof given.proved !== "boolean") {
 		throw new TypeError("a rule gives null or { principal: string, proved: boolean }");
 	}
 	return { principal: given.principal, proved: given.proved && provenBy(request, given.principal) };
 }
+
+/**
+ * CI1: a rule that returns a promise, or any thenable, is refused like any other malformed result; its own
+ * outcome is consumed, a rejection included, at once or later, so that nothing escapes to the host's
+ * runtime. The outcome is observed, never used: a promise is not a principal answered at once.
+ */
+function consumedThenable(given: unknown): boolean {
+	if ((typeof given !== "object" && typeof given !== "function") || given === null) return false;
+	let then: unknown;
+	try {
+		then = (given as { then?: unknown }).then;
+	} catch {
+		// A result whose then cannot even be read is malformed, and refused all the same.
+		return true;
+	}
+	if (typeof then !== "function") return false;
+	// Promise.resolve adopts the thenable; its outcome, or a then that throws, settles a promise observed here.
+	Promise.resolve(given as PromiseLike<unknown>).then(ignore, ignore);
+	return true;
+}
+
+function ignore(): void {}
 
 /**
  * CI4: whether AGP's evidence proved exactly this principal - a verified peer whose verified principal is

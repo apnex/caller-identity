@@ -21,7 +21,8 @@ export interface RuledPrincipal {
 
 /**
  * A host's rule (CI1): turns a session's evidence - AGP's identity-admission request, carrying the peer's
- * node name and the transport's own evidence - into a principal or into none (`null`).
+ * node name and the transport's own evidence - into a principal or into none (`null`), at once. A rule that
+ * throws, or returns anything else - a promise included, whose outcome is consumed - refuses the session.
  */
 export interface SessionRule {
 	apply(request: IdentityAdmissionRequest): RuledPrincipal | null;

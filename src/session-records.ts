@@ -7,8 +7,14 @@
  * and its session identifier as `sessionId`, or when a pending connection - not yet committed, naming only
  * the host's own session identifier - has it as `localSessionId`. Each record keeps when its session was
  * last found present, from the moment it was admitted; the first sweep that finds it absent notes when
- * absence was first seen; a later sweep that finds it present clears that; and the first sweep at which at
- * least 60 seconds have passed since absence was first seen forgets the record.
+ * absence was first seen; and the first sweep at which at least 60 seconds have passed since then forgets
+ * the record.
+ *
+ * Once absence is noted, no later sweep clears it: a session AGP has dropped from its snapshot has closed
+ * and never returns, so an entry matching the record afterwards - another peer's pending connection with
+ * the same session identifier, or a new session of the same peer reusing it - is not its session. A new
+ * session is admitted afresh, and its admission replaces the record. Before absence is noted, a pending or
+ * admitted match counts as presence, since a pending entry names no peer and may be the record's own.
  */
 import type { ConnectionListSnapshot, NodeId, SessionId } from "@agp/core";
 
@@ -21,7 +27,7 @@ interface SessionRecord {
 	readonly proved: boolean;
 	/** When the session was last found present, starting at the moment it was admitted. */
 	lastPresentAt: number;
-	/** When a sweep first found the session absent since it was last present, or `null`. */
+	/** When a sweep first found the session absent, or `null`; once set, only a new admission resets it. */
 	absentSince: number | null;
 }
 
@@ -62,14 +68,13 @@ export class SessionRecords {
 		}
 		for (const [node, sessions] of this.#byNode) {
 			for (const [session, record] of sessions) {
-				const present = admitted.get(node)?.has(session) === true || pending.has(session);
-				if (present) {
+				if (record.absentSince !== null) {
+					// Noted absence is final: whatever matches now is not this record's session (CI2).
+					if (at - record.absentSince >= FORGET_AFTER_ABSENT_MS) sessions.delete(session);
+				} else if (admitted.get(node)?.has(session) === true || pending.has(session)) {
 					record.lastPresentAt = at;
-					record.absentSince = null;
-				} else if (record.absentSince === null) {
+				} else {
 					record.absentSince = at;
-				} else if (at - record.absentSince >= FORGET_AFTER_ABSENT_MS) {
-					sessions.delete(session);
 				}
 			}
 			if (sessions.size === 0) this.#byNode.delete(node);

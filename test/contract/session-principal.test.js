@@ -12,7 +12,7 @@ import { test } from "node:test";
 import { assertedNodeRule, createCallerIdentity } from "@apnex/caller-identity";
 import { ManualClock } from "../support/manual-clock.js";
 import {
-	closePeer, eventually, newFabric, openSilentConnection, present, startHost, startPeer, stopAll,
+	closePeer, eventually, newFabric, openSilentConnection, present, request, startHost, startPeer, stopAll,
 } from "../support/loopback-host.js";
 
 const START = 1_000_000;
@@ -100,6 +100,53 @@ for (const [what, apply] of [
 		assert.equal(refusal.data.reason, "INTERNAL_ERROR", "AGP refuses a session whose admission faulted");
 		assert.equal(host.connections().length, 0, "AGP holds no connection for it");
 		assert.equal(host.identity.sessionPrincipal("alice.1", "00f00d"), null, "nothing is recorded");
+	});
+}
+
+/** Runs `body` with a process-level observer of unhandled rejections, removed after; returns what it saw. */
+async function observingUnhandledRejections(body) {
+	const escaped = [];
+	const observe = (reason) => { escaped.push(reason); };
+	process.on("unhandledRejection", observe);
+	try {
+		await body();
+		// Node reports an unhandled rejection once the microtasks after it have run; give it a turn of timers.
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	} finally {
+		process.off("unhandledRejection", observe);
+	}
+	return escaped;
+}
+
+for (const when of ["at once", "later"]) {
+	test(`CI1, E18: over the in-process carrier, a rule that returns a promise rejecting ${when} refuses the session, nothing is recorded, no rejection escapes, and the host serves the next peer`, async (t) => {
+		let rejectLater;
+		const rule = {
+			apply(request) {
+				if (request.remoteNodeId !== "alice.1") return assertedNodeRule.apply(request);
+				if (when === "at once") return Promise.reject(new Error("the rule's promise rejected at once"));
+				return new Promise((_, reject) => { rejectLater = () => reject(new Error("the rule's promise rejected later")); });
+			},
+		};
+		const { host, peer } = await setUp(t, { rule, sessionIds: ["00f00d", "00f00e"] });
+		const escaped = await observingUnhandledRejections(async () => {
+			await peer("alice.1");
+			const refusal = await host.refused("00f00d");
+			assert.equal(refusal.data.reason, "INTERNAL_ERROR", "AGP refuses a session whose admission faulted");
+			assert.equal(host.connections().length, 0, "AGP holds no connection for it");
+			assert.equal(host.identity.sessionPrincipal("alice.1", "00f00d"), null, "nothing is recorded");
+			if (when === "later") {
+				assert.equal(typeof rejectLater, "function", "the promise is still unsettled after the refusal");
+				rejectLater();
+			}
+		});
+		assert.deepEqual(escaped, [], "no rejection escapes to the host's runtime");
+		assert.equal(host.identity.sessionPrincipal("alice.1", "00f00d"), null, "the rejection records nothing");
+		const bob = await peer("bob.1");
+		assert.equal(await host.sessionWith("bob.1"), "00f00e");
+		const served = await request(host, bob, { after: when });
+		assert.deepEqual(served.payload, { after: when });
+		assert.deepEqual(served.evidence, { kind: "agp-session", node: "bob.1", principal: "bob", proved: false }, "the host serves the next peer");
 	});
 }
 
@@ -394,25 +441,107 @@ test("CI2, E18: a key admitted again replaces its record's principal and its cer
 	assert.deepEqual(held(), { node: "alice.1", session: "00beef", principal: verified[2], proved: true }, "replaced again, proved again");
 });
 
-test("CI2: a later sweep that finds the session present clears the absence noted, so the record is kept 60 seconds from when absence is next seen", async (t) => {
-	const { clock, fabric, host, peer } = await setUp(t, { sessionIds: ["00d00d", "00d00d"], openTimeoutMs: 1_500 });
-	const alice = await peer("alice.1");
-	assert.equal(await host.sessionWith("alice.1"), "00d00d");
+/**
+ * A host whose ruling holds bob.1's admission until the test denies it, so bob's connection stays pending,
+ * under the session identifier alice.1's closed session had, for exactly as long as the test chooses.
+ */
+async function setUpCollision(t) {
+	let deny;
+	let entered = false;
+	const ruling = {
+		evaluate(request) {
+			if (request.remoteNodeId !== "bob.1") return Promise.resolve({ decision: "allow" });
+			entered = true;
+			return new Promise((resolve) => { deny = () => resolve({ decision: "deny", reasonCode: "POLICY" }); });
+		},
+	};
+	const parts = await setUp(t, { ruling, sessionIds: ["00d00d", "00d00d"], openTimeoutMs: 2_000, admissionDeadlineMs: 2_000 });
+	t.after(() => deny?.());
+	const alice = await parts.peer("alice.1");
+	assert.equal(await parts.host.sessionWith("alice.1"), "00d00d");
+	/** Bob's connection, pending under 00d00d from now until `end()` denies it and AGP drops it. */
+	const collide = async () => {
+		await parts.peer("bob.1");
+		await eventually(() => entered, "bob's admission to reach the host's ruling");
+		const entries = parts.host.connections();
+		assert.equal(entries.length, 1, "only bob's connection is held");
+		assert.equal(entries[0].identityState, "pending");
+		assert.equal(entries[0].localSessionId, "00d00d", "bob is pending under alice's old session identifier");
+		return async () => {
+			deny();
+			await eventually(() => parts.host.connections().length === 0, "AGP to drop bob's denied connection");
+			assert.equal(parts.host.identity.sessionPrincipal("bob.1", "00d00d"), null, "a denied session is not recorded");
+		};
+	};
+	return { ...parts, alice, collide };
+}
+
+test("CI2, E18: another peer pending with a closed session's identifier only after that session's absence was noted changes nothing: the record is forgotten 60 seconds after absence was first noted", async (t) => {
+	// The verifier's Q9: alice closes at sweep 1 + 1 ms, absence is noted at sweep 2, and bob is pending
+	// under the same identifier from 1 ms before sweep 3 to 1 ms after it.
+	const { clock, host, alice, collide } = await setUpCollision(t);
 	clock.advanceTo(sweep(1));
 	clock.advanceTo(sweep(1) + 1);
 	await closePeer(host, alice, "00d00d");
 	clock.advanceTo(sweep(2));
-	// Absence was noted at sweep 2; a connection pending under the same session identifier is present at sweep 3.
-	const channel = await openSilentConnection(fabric);
-	t.after(() => channel.abort({ kind: "forced-stop", code: "test-done" }));
-	await eventually(() => host.connections().some((c) => c.identityState === "pending" && c.localSessionId === "00d00d"), "the silent connection pending under 00d00d");
+	clock.advanceTo(sweep(3) - 1);
+	const end = await collide();
 	clock.advanceTo(sweep(3));
-	await eventually(() => !present(host, "alice.1", "00d00d"), "AGP's opening time-out to end the pending connection");
-	clock.advanceTo(sweep(4));
-	clock.advanceTo(sweep(6) - 1);
+	clock.advanceTo(sweep(3) + 1);
+	await end();
+	clock.advanceTo(sweep(4) - 1);
 	found(host, "alice.1", "00d00d");
-	clock.advanceTo(sweep(6));
+	clock.advanceTo(sweep(4));
 	gone(host, "alice.1", "00d00d");
+});
+
+test("CI2, E18: another peer pending with a closed session's identifier at the sweep right after the close delays the noting of absence to the next sweep", async (t) => {
+	// Alice closes at sweep 1 + 1 ms; bob is pending under the same identifier from 1 ms before sweep 2 to
+	// 1 ms after it, so sweep 2 finds the identifier present and absence is first noted at sweep 3.
+	const { clock, host, alice, collide } = await setUpCollision(t);
+	clock.advanceTo(sweep(1));
+	clock.advanceTo(sweep(1) + 1);
+	await closePeer(host, alice, "00d00d");
+	clock.advanceTo(sweep(2) - 1);
+	const end = await collide();
+	clock.advanceTo(sweep(2));
+	clock.advanceTo(sweep(2) + 1);
+	await end();
+	clock.advanceTo(sweep(4));
+	found(host, "alice.1", "00d00d", "alice");
+	clock.advanceTo(sweep(5) - 1);
+	found(host, "alice.1", "00d00d");
+	clock.advanceTo(sweep(5));
+	gone(host, "alice.1", "00d00d");
+});
+
+test("CI2: once absence is noted, no matching entry clears it, pending or admitted; before it is noted, either counts as presence", async () => {
+	const clock = new ManualClock(START);
+	let items = [];
+	const identity = createCallerIdentity({ rule: assertedNodeRule, clock });
+	const request = (node, session) => ({ localNodeId: "hub", remoteNodeId: node, localSessionId: session, remoteSessionId: "000009", direction: "inbound", peerEvidence: { locality: "network", protection: "none", authentication: { kind: "none" } } });
+	const pending = (session) => ({ identityState: "pending", localSessionId: session });
+	const admitted = (node, session) => ({ identityState: "admitted", remoteNodeId: node, sessionId: session });
+	await identity.admission.evaluate(request("alice.1", "000001"));
+	await identity.admission.evaluate(request("carol.1", "000002"));
+	identity.start({ connections: () => ({ items }) });
+	const held = (node, session) => identity.sessionPrincipal(node, session) !== null;
+	// Sweep 1 finds both sessions present, one through a pending entry and one admitted.
+	items = [pending("000001"), admitted("carol.1", "000002")];
+	clock.advanceTo(sweep(1));
+	// Sweep 2 finds both absent: absence is noted for both.
+	items = [];
+	clock.advanceTo(sweep(2));
+	// Sweeps 3 and 4 find matching entries again; neither clears the noted absence.
+	items = [pending("000001"), admitted("carol.1", "000002")];
+	clock.advanceTo(sweep(3));
+	assert.ok(held("alice.1", "000001") && held("carol.1", "000002"), "sweep 1 counted both as present, so absence was first noted at sweep 2, 30 seconds ago");
+	clock.advanceTo(sweep(4) - 1);
+	assert.ok(held("alice.1", "000001") && held("carol.1", "000002"));
+	clock.advanceTo(sweep(4));
+	assert.equal(identity.sessionPrincipal("alice.1", "000001"), null, "a pending match after noted absence is not its session");
+	assert.equal(identity.sessionPrincipal("carol.1", "000002"), null, "an admitted match after noted absence is not its session");
+	identity.stop();
 });
 
 // CI2 - the admission deadline.
