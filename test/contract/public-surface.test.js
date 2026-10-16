@@ -102,7 +102,7 @@ test("AGP is taken only as types: every source import of @agp is type-only, and 
 });
 
 test("AGP is a peer, the host's own, through a file: link, and every AGP package the tests use is a file: link to ../agp/packages", () => {
-	assert.equal(pkg.dependencies, undefined, "caller-identity has no run-time dependency of its own");
+	assert.deepEqual(pkg.dependencies, { "@apnex/shape-check": "file:../shape-check" }, "caller-identity depends only on shape-check at run time");
 	assert.deepEqual(pkg.peerDependencies, { "@agp/core": "file:../agp/packages/core" });
 	const agp = Object.entries(pkg.devDependencies).filter(([name]) => name.startsWith("@agp/"));
 	assert.ok(agp.length > 0);

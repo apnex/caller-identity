@@ -233,18 +233,15 @@ test("CI4, E18: over the in-process carrier, a rule claiming proof for exactly t
 /** The principal and certainty of an evidence record, as a session record gives them. */
 const pick = ({ principal, proved }) => ({ principal, proved });
 
-test("CI1, CI4, E18: a rule whose result's principal is a getter giving a different name on a later read is never recorded proved for a name the transport did not verify", async (t) => {
-	// Each getter gives one name on its first read and another on every later one; a component that read the
-	// principal more than once could check one name and record the other.
+test("CI1, CI4, E18, D2-E3, D54: a rule whose result's principal or proved is a getter is refused as non-plain data without calling the getter, and nothing is recorded", async (t) => {
+	// Under D54, a getter on a rule's result is never called and refuses the session outright.
 	const reads = new Map();
 	const getter = (name, first, later) => ({
 		get principal() { const n = (reads.get(name) ?? 0) + 1; reads.set(name, n); return n === 1 ? first : later; },
 		proved: true,
 	});
 	const results = {
-		// Gives "alice" first, the verified principal after: as the verifier's V11 rule did.
 		"late.1": (verified) => getter("late.1", "alice", verified),
-		// Gives the verified principal first, "alice" after.
 		"early.1": (verified) => getter("early.1", verified, "alice"),
 		// Ordinary controls: a plain result claiming proof for the verified principal, and for another name.
 		"same.1": (verified) => ({ principal: verified, proved: true }),
@@ -252,8 +249,14 @@ test("CI1, CI4, E18: a rule whose result's principal is a getter giving a differ
 	};
 	const rule = { apply: (r) => results[r.remoteNodeId](r.peerEvidence.authentication.principal) };
 	const { host, peer, evidenceOf } = await claimingHost(t, rule);
+	for (const name of ["late.1", "early.1"]) {
+		await peer(name);
+		await eventually(() => !host.connections().some((c) => c.remoteNodeId === name), `${name} refused`);
+	}
+	assert.equal(reads.get("late.1"), undefined, "the getter is never called");
+	assert.equal(reads.get("early.1"), undefined, "the getter is never called");
 	const recorded = {};
-	for (const name of Object.keys(results)) {
+	for (const name of ["same.1", "other.1"]) {
 		const { delivery, evidence } = await request(host, await peer(name));
 		const authentication = evidenceOf.get(name).authentication;
 		assert.equal(authentication.kind, "verified");
@@ -262,26 +265,25 @@ test("CI1, CI4, E18: a rule whose result's principal is a getter giving a differ
 		if (evidence.proved) assert.equal(evidence.principal, authentication.principal, `${name}: proved only for the verified principal`);
 		recorded[name] = { verified: authentication.principal, evidence };
 	}
-	assert.equal(reads.get("late.1"), 1, "the principal is read once");
-	assert.equal(reads.get("early.1"), 1, "the principal is read once");
-	// The one value read is the one checked and the one recorded.
-	assertCertainty(recorded["late.1"].evidence, "late.1", "alice", false);
-	assertCertainty(recorded["early.1"].evidence, "early.1", recorded["early.1"].verified, true);
 	assertCertainty(recorded["same.1"].evidence, "same.1", recorded["same.1"].verified, true);
 	assertCertainty(recorded["other.1"].evidence, "other.1", "other", false);
 });
 
-test("CI1: a rule's result whose principal or proved cannot be read refuses the session, and nothing is recorded", async () => {
+test("CI1, D2-E3, D54: a rule's result whose principal or proved is a getter, or is non-plain data, refuses the session with zero getter invocations, and nothing is recorded", async () => {
 	const admission = { localNodeId: "hub", remoteNodeId: "alice.1", localSessionId: "000001", remoteSessionId: "000002", direction: "inbound", peerEvidence: { locality: "process-local", protection: "none", authentication: { kind: "verified", principal: "alice" } } };
+	let calls = 0;
 	const failing = [
-		{ get principal() { throw new Error("principal unreadable"); }, proved: true },
-		{ principal: "alice", get proved() { throw new Error("proved unreadable"); } },
+		{ get principal() { calls++; throw new Error("principal unreadable"); }, proved: true },
+		{ principal: "alice", get proved() { calls++; throw new Error("proved unreadable"); } },
+		Object.create({ principal: "alice", proved: true }),
+		{ principal: "alice", proved: true, extra: 1 },
 	];
 	for (const result of failing) {
 		const identity = createCallerIdentity({ rule: { apply: () => result }, clock: new ManualClock(START) });
-		await assert.rejects(identity.admission.evaluate(admission), /unreadable/);
+		await assert.rejects(identity.admission.evaluate(admission), /plain data/);
 		assert.equal(identity.sessionPrincipal("alice.1", "000001"), null);
 	}
+	assert.equal(calls, 0, "no getter on a rule's result was called");
 });
 
 test("CI4, E18: over a session whose evidence reports no authentication, a rule claiming proof is recorded asserted", async (t) => {

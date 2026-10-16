@@ -966,3 +966,73 @@ test("CI2, E18: the sweeping stopped twice: the second stop changes nothing, rec
 	clock.advanceTo(sweep(13));
 	gone(host, "alice.1", "000b01");
 });
+
+test("D2-E3, CI1, CI2, D54, D55: SessionRule.apply, IdentityAdmissionPort.evaluate and ConnectionSource.connections read results as plain data through shape-check, with zero getter calls and zero unhandled rejections on non-plain or thrown values", async () => {
+	const clock = new ManualClock(START);
+	const admission = { localNodeId: "hub", remoteNodeId: "alice.1", localSessionId: "000001", remoteSessionId: "000002", direction: "inbound", peerEvidence: { locality: "network", protection: "none", authentication: { kind: "none" } } };
+	let getters = 0;
+	const escaped = await observingUnhandledRejections(async () => {
+		// 1. SessionRule.apply: non-plain results, non-native thenables, nested rejected promises, and thrown objects holding a rejected promise.
+		const ruleCases = [
+			() => ({ get principal() { getters++; return "alice"; }, proved: false, p: Promise.reject(new Error("rule getter promise")) }),
+			() => ({ then(resolve) { getters++; resolve({ principal: "alice", proved: false }); }, p: Promise.reject(new Error("rule thenable promise")) }),
+			() => Object.create({ principal: "alice", proved: false }),
+			() => ({ principal: "alice", proved: false, p: Promise.reject(new Error("rule nested promise")) }),
+			() => { throw Object.assign(new Error("rule threw"), { p: Promise.reject(new Error("rule thrown promise")) }); },
+		];
+		for (const apply of ruleCases) {
+			const identity = createCallerIdentity({ rule: { apply }, clock });
+			await assert.rejects(identity.admission.evaluate(admission));
+			assert.equal(identity.sessionPrincipal("alice.1", "000001"), null);
+		}
+
+		// 2. IdentityAdmissionPort.evaluate: non-plain results, non-native thenables, invalid denial reasonCode, nested rejected promises, and thrown/rejected promises.
+		const admissionCases = [
+			() => ({ get decision() { getters++; return "allow"; }, p: Promise.reject(new Error("admission getter promise")) }),
+			() => ({ then(resolve) { getters++; resolve({ decision: "allow" }); }, p: Promise.reject(new Error("admission thenable promise")) }),
+			() => Promise.resolve({ decision: "deny" }),
+			() => Promise.resolve({ decision: "deny", reasonCode: "NOT_AN_AGP_CODE" }),
+			() => Promise.resolve({ decision: "allow", extra: Promise.reject(new Error("admission nested promise")) }),
+			() => Promise.reject(Object.assign(new Error("admission rejected"), { p: Promise.reject(new Error("admission rejected nested")) })),
+			() => { throw Object.assign(new Error("admission threw"), { p: Promise.reject(new Error("admission thrown nested")) }); },
+		];
+		for (const evaluate of admissionCases) {
+			const identity = createCallerIdentity({ rule: assertedNodeRule, admission: { evaluate }, clock });
+			await assert.rejects(identity.admission.evaluate(admission));
+			assert.equal(identity.sessionPrincipal("alice.1", "000001"), null);
+		}
+		// Valid AGP denial codes pass as plain data.
+		for (const reasonCode of ["POLICY", "EXPECTED_NODE_MISMATCH", "SECURITY_EVIDENCE", "CAPACITY"]) {
+			const identity = createCallerIdentity({ rule: assertedNodeRule, admission: { evaluate: () => ({ decision: "deny", reasonCode }) }, clock });
+			assert.deepEqual(await identity.admission.evaluate(admission), { decision: "deny", reasonCode });
+			assert.equal(identity.sessionPrincipal("alice.1", "000001"), null);
+		}
+
+		// 3. ConnectionSource.connections: non-plain results, getters, nested rejected promises, and thrown objects holding a rejected promise.
+		const snapshotCases = [
+			() => ({ get items() { getters++; return []; }, p: Promise.reject(new Error("snapshot getter promise")) }),
+			() => ({ items: [{ identityState: "admitted", get remoteNodeId() { getters++; return "alice.1"; }, sessionId: "000001", p: Promise.reject(new Error("entry getter promise")) }] }),
+			() => ({ items: [{ identityState: "admitted", remoteNodeId: "alice.1" }] }),
+			() => ({ items: [{ identityState: "pending" }] }),
+			() => Object.create({ items: [] }),
+			() => { throw Object.assign(new Error("snapshot threw"), { p: Promise.reject(new Error("snapshot thrown promise")) }); },
+		];
+		for (const connections of snapshotCases) {
+			const reports = [];
+			const tickClock = new ManualClock(START);
+			const identity = createCallerIdentity({
+				rule: assertedNodeRule,
+				clock: tickClock,
+				diagnostic: { report(d) { reports.push(d); throw Object.assign(new Error("diagnostic threw"), { p: Promise.reject(new Error("diagnostic thrown promise")) }); } },
+			});
+			await identity.admission.evaluate(admission);
+			identity.start({ connections });
+			tickClock.advanceBy(SWEEP);
+			assert.equal(reports.length, 1, "unreadable snapshot reported to diagnostic");
+			assert.deepEqual(identity.sessionPrincipal("alice.1", "000001"), record("alice.1", "000001", "alice"), "record kept when snapshot is not plain data");
+			identity.stop();
+		}
+	});
+	assert.equal(getters, 0, "no getter on any plug-in result was invoked");
+	assert.deepEqual(escaped, [], "every rejected promise was observed");
+});

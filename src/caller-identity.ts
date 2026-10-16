@@ -3,12 +3,14 @@
  * sweeps the host starts and stops with that node, and the evidence of each request.
  */
 import type {
+	ConnectionListSnapshot,
 	IdentityAdmissionPort,
 	IdentityAdmissionRequest,
 	IdentityAdmissionResult,
 	NodeId,
 	SessionId,
 } from "@agp/core";
+import { observePromises, readPlainJson } from "@apnex/shape-check";
 import { defaultClock, type Cancellable, type ClockPort } from "./clock.js";
 import type {
 	AgpSessionEvidence,
@@ -59,43 +61,82 @@ export function createCallerIdentity(options: CallerIdentityOptions): CallerIden
 	return new Instance(rule, ruling, deadlineMs, clock, diagnostic);
 }
 
-/** What a rule gave, checked, with `proved` held to CI4. */
+const DENIAL_CODES = new Set(["POLICY", "EXPECTED_NODE_MISMATCH", "SECURITY_EVIDENCE", "CAPACITY"]);
+
+/** What a rule gave, read as plain data through shape-check (CI1; zorg's D54, D55), with `proved` held to CI4. */
 function ruled(rule: SessionRule, request: IdentityAdmissionRequest): { principal: string | null; proved: boolean } {
-	const given: RuledPrincipal | null = rule.apply(request);
-	if (given === null) return { principal: null, proved: false };
-	if (consumedThenable(given)) throw new TypeError("a rule answers at once: a promise it returns is refused");
-	if (typeof given !== "object") throw new TypeError("a rule gives null or { principal: string, proved: boolean }");
-	// CI1, CI4: each is read once, and the values read are the ones checked and recorded, so an accessor
-	// cannot give one principal to the check and another to the record. A read that throws refuses the session.
-	const principal: unknown = given.principal;
-	const claimed: unknown = given.proved;
-	if (typeof principal !== "string" || typeof claimed !== "boolean") {
-		throw new TypeError("a rule gives null or { principal: string, proved: boolean }");
+	let raw: RuledPrincipal | null;
+	try {
+		raw = rule.apply(request);
+	} catch (error) {
+		observePromises(error);
+		throw error;
 	}
-	return { principal, proved: claimed && provenBy(request, principal) };
+	const plain = readPlainJson(raw);
+	if (!plain.ok) throw new TypeError("a rule gives null or { principal: string, proved: boolean } as plain data");
+	if (plain.value === null) return { principal: null, proved: false };
+	if (typeof plain.value !== "object" || Array.isArray(plain.value)) {
+		throw new TypeError("a rule gives null or { principal: string, proved: boolean } as plain data");
+	}
+	const keys = Object.keys(plain.value);
+	const { principal, proved } = plain.value as { readonly principal?: unknown; readonly proved?: unknown };
+	if (keys.length !== 2 || typeof principal !== "string" || typeof proved !== "boolean") {
+		throw new TypeError("a rule gives null or { principal: string, proved: boolean } as plain data");
+	}
+	return { principal, proved: proved && provenBy(request, principal) };
 }
 
 /**
- * CI1: a rule that returns a promise, or any thenable, is refused like any other malformed result; its own
- * outcome is consumed, a rejection included, at once or later, so that nothing escapes to the host's
- * runtime. The outcome is observed, never used: a promise is not a principal answered at once.
+ * Reads an admission ruling's settled answer as plain data (CI2; zorg's D54, D55): `{decision: "allow"}` or
+ * `{decision: "deny", reasonCode}` with an AGP `IdentityDenialCode`, or undefined when it is anything else.
  */
-function consumedThenable(given: unknown): boolean {
-	if ((typeof given !== "object" && typeof given !== "function") || given === null) return false;
-	let then: unknown;
-	try {
-		then = (given as { then?: unknown }).then;
-	} catch {
-		// A result whose then cannot even be read is malformed, and refused all the same.
-		return true;
+function readAdmissionResult(value: unknown): IdentityAdmissionResult | undefined {
+	const plain = readPlainJson(value);
+	if (!plain.ok || plain.value === null || typeof plain.value !== "object" || Array.isArray(plain.value)) return undefined;
+	const keys = Object.keys(plain.value);
+	const { decision, reasonCode } = plain.value as { readonly decision?: unknown; readonly reasonCode?: unknown };
+	if (decision === "allow" && keys.length === 1) return ALLOW;
+	if (decision === "deny" && keys.length === 2 && typeof reasonCode === "string" && DENIAL_CODES.has(reasonCode)) {
+		return Object.freeze({ decision: "deny", reasonCode: reasonCode as Extract<IdentityAdmissionResult, { decision: "deny" }>["reasonCode"] });
 	}
-	if (typeof then !== "function") return false;
-	// Promise.resolve adopts the thenable; its outcome, or a then that throws, settles a promise observed here.
-	Promise.resolve(given as PromiseLike<unknown>).then(ignore, ignore);
-	return true;
+	return undefined;
 }
 
-function ignore(): void {}
+/**
+ * Reads a connection snapshot as plain data (CI2; zorg's D54, D55): `{items}` where each item is a plain object
+ * whose `identityState` is `"admitted"` (with string `remoteNodeId` and `sessionId`) or `"pending"` (with string
+ * `localSessionId`). Anything else throws a TypeError after `readPlainJson` has observed any native promises.
+ */
+function readConnectionSnapshot(raw: unknown): ConnectionListSnapshot {
+	const plain = readPlainJson(raw);
+	if (!plain.ok || plain.value === null || typeof plain.value !== "object" || Array.isArray(plain.value)) {
+		throw new TypeError("a connection snapshot must be a plain JSON object with an items array");
+	}
+	const items = (plain.value as { readonly items?: unknown }).items;
+	if (!Array.isArray(items)) {
+		throw new TypeError("a connection snapshot must be a plain JSON object with an items array");
+	}
+	for (const entry of items) {
+		if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+			throw new TypeError("each connection snapshot entry must be a plain JSON object");
+		}
+		const state = (entry as { readonly identityState?: unknown }).identityState;
+		if (state === "admitted") {
+			const { remoteNodeId, sessionId } = entry as { readonly remoteNodeId?: unknown; readonly sessionId?: unknown };
+			if (typeof remoteNodeId !== "string" || typeof sessionId !== "string") {
+				throw new TypeError("an admitted connection entry must carry string remoteNodeId and sessionId");
+			}
+		} else if (state === "pending") {
+			const { localSessionId } = entry as { readonly localSessionId?: unknown };
+			if (typeof localSessionId !== "string") {
+				throw new TypeError("a pending connection entry must carry a string localSessionId");
+			}
+		} else {
+			throw new TypeError("a connection entry's identityState must be admitted or pending");
+		}
+	}
+	return plain.value as unknown as ConnectionListSnapshot;
+}
 
 /**
  * CI4: whether AGP's evidence proved exactly this principal - a verified peer whose verified principal is
@@ -187,17 +228,47 @@ class Instance implements CallerIdentity {
 				}
 				settle();
 			};
-			let ruled: Promise<IdentityAdmissionResult>;
+			const settleResult = (result: unknown): void => {
+				const checked = readAdmissionResult(result);
+				answer(() => {
+					if (checked !== undefined) resolve(checked);
+					else reject(new TypeError("an admission ruling gives { decision: \"allow\" } or { decision: \"deny\", reasonCode } as plain data"));
+				});
+			};
+			let raw: unknown;
 			try {
-				ruled = Promise.resolve(ruling.evaluate(request));
+				raw = ruling.evaluate(request);
 			} catch (error) {
+				observePromises(error);
 				answer(() => reject(error));
 				return;
 			}
-			ruled.then(
-				(result) => answer(() => resolve(result)),
-				(error: unknown) => answer(() => reject(error)),
-			);
+			let native = false;
+			try {
+				native = raw instanceof Promise;
+			} catch (error) {
+				observePromises(error);
+				observePromises(raw);
+				answer(() => reject(error));
+				return;
+			}
+			if (native) {
+				try {
+					Reflect.apply(Promise.prototype.then, raw, [
+						(result: unknown) => settleResult(result),
+						(error: unknown) => {
+							observePromises(error);
+							answer(() => reject(error));
+						},
+					]);
+				} catch (error) {
+					observePromises(error);
+					observePromises(raw);
+					answer(() => reject(error));
+				}
+				return;
+			}
+			settleResult(raw);
 		});
 	}
 
@@ -241,12 +312,13 @@ class Instance implements CallerIdentity {
 			this.#schedule(Math.ceil(this.#due - now));
 			return;
 		}
-		let snapshot;
+		let snapshot: ConnectionListSnapshot | undefined;
 		try {
-			snapshot = source.connections();
+			snapshot = readConnectionSnapshot(source.connections());
 		} catch (error) {
 			// A snapshot that cannot be read changes no record: nothing keeps a record shorter (CI2). It can
 			// keep records longer, so the host is told.
+			observePromises(error);
 			snapshot = undefined;
 			this.#report(now, error);
 		}
@@ -261,8 +333,9 @@ class Instance implements CallerIdentity {
 		if (this.#diagnostic === undefined) return;
 		try {
 			this.#diagnostic.report(Object.freeze({ kind: "snapshot-unreadable", at, error }));
-		} catch {
+		} catch (diagnosticError) {
 			// The diagnostic port is the host's; its failure must not stop the sweeping.
+			observePromises(diagnosticError);
 		}
 	}
 
