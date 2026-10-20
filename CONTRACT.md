@@ -48,7 +48,7 @@ Issuing credentials - drawv2's connection codes among them, and the admission ke
 
 **Maturity: provisional**, designed under zorg's Delta 1, amendment 2, and zorg's rulings `D26`, `D31`, `D35` and `D37`.\
 Each declaration names the exit criterion of zorg's `docs/DELTAS/DELTA-1.md` that proves it and the test that exercises it.\
-AGP's evidence, admission port and delivery context are those of AGP at `f16266a` (zorg's `D42`).
+AGP's evidence, admission port and delivery context are those of AGP at `baa2c1a` (zorg's `D42`).
 
 **CI1 - A host's rule.**\
 A host gives caller-identity a rule that turns a session's evidence into a principal or into none: a port whose `apply`, given AGP's identity-admission request, returns at once `{principal, proved}` or `null`, read as plain data through `shape-check`'s `readPlainJson` and `observePromises` (zorg's `D54`, `D55`) - `null`, or a plain object holding only `principal`, a string, and `proved`, a boolean, as own enumerable data properties, running no getter, no inherited field, no non-enumerable property, no symbol and no `then`; a rule that throws, or returns anything else, a promise or a non-native thenable included, refuses the session, nothing is recorded, and any native `Promise` met within the reader's bound on what it returned or threw is given a do-nothing handler so no rejection escapes to the host's runtime.\

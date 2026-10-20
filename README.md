@@ -12,12 +12,12 @@ Its contract tests run a host over AGP's production in-process carrier, with an 
 
 It belongs to a component set first composed by zorg (`apnex/zorg`), and is private until its first working code.
 
-It depends on `@apnex/shape-check` through a `file:` link, and takes AGP's types as a peer of the host that embeds it, through a `file:` link to an AGP checkout beside it at `f16266a`, each installed and built first, since neither commits its `dist/`.\
+It depends on `@apnex/shape-check` through a `file:` link, and takes AGP's types as a peer of the host that embeds it, through a `file:` link to an AGP checkout beside it at `baa2c1a`, each installed and built first, since neither commits its `dist/`.\
 The tests link AGP's `@agp/node` and `@agp/transport-loopback` the same way, and Node resolves AGP's own packages from that checkout's workspace.
 
 To run the tests from clean checkouts:
 ```sh
-(cd ../agp && git checkout f16266a && npm install && npm run build)
+(cd ../agp && git checkout baa2c1a && npm install && npm run build)
 (cd ../shape-check && npm install && npm run build)
 npm install
 npm test
