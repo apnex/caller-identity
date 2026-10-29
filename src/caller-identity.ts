@@ -1,12 +1,13 @@
 /**
- * caller-identity's composition of CI1 to CI4: the identity-admission port a host gives its AGP node, the
- * sweeps the host starts and stops with that node, and the evidence of each request.
+ * caller-identity's composition of CI1 to CI4 and CI6: the identity-admission port a host gives its AGP node,
+ * the sweeps the host starts and stops with that node, credential verification, and the evidence of each request.
  */
 import type {
 	ConnectionListSnapshot,
 	IdentityAdmissionPort,
 	IdentityAdmissionRequest,
 	IdentityAdmissionResult,
+	IdentityDenialCode,
 	NodeId,
 	SessionId,
 } from "@agp/core";
@@ -14,16 +15,32 @@ import { observePromises, readPlainJson } from "@apnex/shape-check";
 import { defaultClock, type Cancellable, type ClockPort } from "./clock.js";
 import type {
 	AgpSessionEvidence,
+	AuthorizationAssociation,
 	CallerIdentity,
+	CallerIdentityAdmissionPort,
+	CallerIdentityMode,
 	CallerIdentityOptions,
 	ConnectionSource,
 	DeliveryEvidenceInput,
 	DiagnosticPort,
+	IdentityAdmissionEvaluateOptions,
+	RedeemedAdmissionVerifier,
+	RequestEvidence,
 	RuledPrincipal,
 	SessionPrincipal,
 	SessionRule,
+	VerifiedCredential,
+	VerifiedPrincipalEvidence,
 } from "./identity-types.js";
 import { SessionRecords } from "./session-records.js";
+import {
+	assertValidVerifiedCredential,
+	isValidBoundedIdentifier,
+	isValidIssuer,
+	runVerifiers,
+	validateClock,
+	validateVerifiers,
+} from "./verified-principal.js";
 
 /** How often, by the host's clock, the connection snapshot is swept (CI2). */
 export const SWEEP_INTERVAL_MS = 30_000;
@@ -32,24 +49,43 @@ export const SWEEP_INTERVAL_MS = 30_000;
 export const DEFAULT_ADMISSION_DEADLINE_MS = 10_000;
 
 const ALLOW: IdentityAdmissionResult = Object.freeze({ decision: "allow" });
+const ALLOW_UNAUTHENTICATED: IdentityAdmissionResult & { readonly authorizationAssociation: AuthorizationAssociation } = Object.freeze({
+	decision: "allow",
+	authorizationAssociation: Object.freeze({ mode: "unauthenticated" as const }),
+});
 /** The answer to an admission whose ruling has not answered by the deadline (CI2). */
 const DEADLINE_DENIAL: IdentityAdmissionResult = Object.freeze({ decision: "deny", reasonCode: "POLICY" });
+const SECURITY_DENIAL: IdentityAdmissionResult = Object.freeze({ decision: "deny", reasonCode: "SECURITY_EVIDENCE" });
 
 /** Creates one caller-identity instance for one host node. */
 export function createCallerIdentity(options: CallerIdentityOptions): CallerIdentity {
 	if (typeof options !== "object" || options === null) throw new TypeError("caller-identity needs options");
-	const rule = options.rule;
-	if (typeof rule !== "object" || rule === null || typeof rule.apply !== "function") {
-		throw new TypeError("caller-identity needs the host's rule: an object with apply(request)");
+	const mode = options.mode;
+	if (mode !== undefined && mode !== "unauthenticated" && mode !== "authenticated") {
+		throw new TypeError("caller-identity mode must be \"unauthenticated\", \"authenticated\", or undefined");
 	}
+	const rule = options.rule;
+	if (mode !== "authenticated") {
+		if (typeof rule !== "object" || rule === null || typeof rule.apply !== "function") {
+			throw new TypeError("caller-identity needs the host's rule: an object with apply(request)");
+		}
+	} else if (rule !== undefined && (typeof rule !== "object" || rule === null || typeof rule.apply !== "function")) {
+		throw new TypeError("when supplied, the host's rule must be an object with apply(request)");
+	}
+	const redeemedVerifier = options.redeemedVerifier;
+	if (mode === "authenticated") {
+		if (typeof redeemedVerifier !== "object" || redeemedVerifier === null || typeof redeemedVerifier.verifyRedeemed !== "function") {
+			throw new TypeError("caller-identity in \"authenticated\" mode requires redeemedVerifier with verifyRedeemed(input)");
+		}
+	} else if (redeemedVerifier !== undefined && (typeof redeemedVerifier !== "object" || redeemedVerifier === null || typeof redeemedVerifier.verifyRedeemed !== "function")) {
+		throw new TypeError("when supplied, redeemedVerifier must be an object with verifyRedeemed(input)");
+	}
+	const verifiers = options.verifiers === undefined ? Object.freeze([]) : validateVerifiers(options.verifiers);
 	const ruling = options.admission;
 	if (ruling !== undefined && (typeof ruling !== "object" || ruling === null || typeof ruling.evaluate !== "function")) {
 		throw new TypeError("an admission ruling is an identity-admission port: an object with evaluate(request)");
 	}
-	const clock = options.clock ?? defaultClock;
-	if (typeof clock !== "object" || clock === null || typeof clock.now !== "function" || typeof clock.schedule !== "function") {
-		throw new TypeError("a clock port is an object with now() and schedule(delayMs, callback)");
-	}
+	const clock = options.clock === undefined ? defaultClock : validateClock(options.clock);
 	const deadlineMs = options.admissionDeadlineMs ?? DEFAULT_ADMISSION_DEADLINE_MS;
 	if (typeof deadlineMs !== "number" || !Number.isFinite(deadlineMs) || deadlineMs <= 0) {
 		throw new TypeError("an admission deadline is a positive, finite number of milliseconds");
@@ -58,10 +94,10 @@ export function createCallerIdentity(options: CallerIdentityOptions): CallerIden
 	if (diagnostic !== undefined && (typeof diagnostic !== "object" || diagnostic === null || typeof diagnostic.report !== "function")) {
 		throw new TypeError("a diagnostic port is an object with report(diagnostic)");
 	}
-	return new Instance(rule, ruling, deadlineMs, clock, diagnostic);
+	return new Instance(rule, mode, redeemedVerifier, verifiers, ruling, deadlineMs, clock, diagnostic);
 }
 
-const DENIAL_CODES = new Set(["POLICY", "EXPECTED_NODE_MISMATCH", "SECURITY_EVIDENCE", "CAPACITY"]);
+const DENIAL_CODES = new Set<IdentityDenialCode>(["POLICY", "EXPECTED_NODE_MISMATCH", "SECURITY_EVIDENCE", "CAPACITY"]);
 
 /** What a rule gave, read as plain data through shape-check (CI1; zorg's D54, D55), with `proved` held to CI4. */
 function ruled(rule: SessionRule, request: IdentityAdmissionRequest): { principal: string | null; proved: boolean } {
@@ -96,10 +132,92 @@ function readAdmissionResult(value: unknown): IdentityAdmissionResult | undefine
 	const keys = Object.keys(plain.value);
 	const { decision, reasonCode } = plain.value as { readonly decision?: unknown; readonly reasonCode?: unknown };
 	if (decision === "allow" && keys.length === 1) return ALLOW;
-	if (decision === "deny" && keys.length === 2 && typeof reasonCode === "string" && DENIAL_CODES.has(reasonCode)) {
-		return Object.freeze({ decision: "deny", reasonCode: reasonCode as Extract<IdentityAdmissionResult, { decision: "deny" }>["reasonCode"] });
+	if (decision === "deny" && keys.length === 2 && typeof reasonCode === "string" && DENIAL_CODES.has(reasonCode as IdentityDenialCode)) {
+		return Object.freeze({ decision: "deny", reasonCode: reasonCode as IdentityDenialCode });
 	}
 	return undefined;
+}
+
+/**
+ * Reads `options` and `options.redeemedAdmission` via own enumerable data descriptors only (CI2, CI6, D54):
+ * never invokes a getter, rejects symbol properties or non-plain objects, and requires a valid bounded identifier
+ * `redemptionId` and non-null object `lifecycle` (preserving exact object identity of `lifecycle`).
+ */
+function readRedeemedAdmissionOption(options: unknown): { readonly redemptionId: string; readonly lifecycle: object } | null {
+	if (typeof options !== "object" || options === null || Array.isArray(options)) return null;
+	const optProto = Object.getPrototypeOf(options);
+	if (optProto !== Object.prototype && optProto !== null) return null;
+	if (Object.getOwnPropertySymbols(options).length > 0) return null;
+	for (const key of Object.getOwnPropertyNames(options)) {
+		const desc = Object.getOwnPropertyDescriptor(options, key);
+		if (desc === undefined || !desc.enumerable || !("value" in desc)) return null;
+	}
+	const raDesc = Object.getOwnPropertyDescriptor(options, "redeemedAdmission");
+	if (raDesc === undefined || !raDesc.enumerable || !("value" in raDesc)) return null;
+	const ra = raDesc.value as unknown;
+	if (typeof ra !== "object" || ra === null || Array.isArray(ra)) return null;
+	const raProto = Object.getPrototypeOf(ra);
+	if (raProto !== Object.prototype && raProto !== null) return null;
+	if (Object.getOwnPropertySymbols(ra).length > 0) return null;
+	const raKeys = Object.getOwnPropertyNames(ra);
+	if (raKeys.length !== 2) return null;
+	const idDesc = Object.getOwnPropertyDescriptor(ra, "redemptionId");
+	const lcDesc = Object.getOwnPropertyDescriptor(ra, "lifecycle");
+	if (
+		idDesc === undefined ||
+		lcDesc === undefined ||
+		!idDesc.enumerable ||
+		!lcDesc.enumerable ||
+		!("value" in idDesc) ||
+		!("value" in lcDesc) ||
+		!isValidBoundedIdentifier(idDesc.value) ||
+		typeof lcDesc.value !== "object" ||
+		lcDesc.value === null
+	) {
+		return null;
+	}
+	return { redemptionId: idDesc.value, lifecycle: lcDesc.value as object };
+}
+
+/**
+ * Reads `redeemedVerifier.verifyRedeemed`'s settled answer as plain data through `readPlainJson` (CI2, CI6, D54, D55).
+ */
+function readRedeemedVerifyResult(
+	raw: unknown,
+):
+	| { readonly ok: true; readonly issuer: string; readonly principal: string; readonly instanceBinding: string }
+	| { readonly ok: false; readonly reasonCode: IdentityDenialCode } {
+	const plain = readPlainJson(raw);
+	if (!plain.ok || plain.value === null || typeof plain.value !== "object" || Array.isArray(plain.value)) {
+		return { ok: false, reasonCode: "SECURITY_EVIDENCE" };
+	}
+	const obj = plain.value as Record<string, unknown>;
+	const keys = Object.keys(obj);
+	if (obj.ok === true) {
+		if (
+			keys.length === 4 &&
+			isValidIssuer(obj.issuer) &&
+			isValidBoundedIdentifier(obj.principal) &&
+			isValidBoundedIdentifier(obj.instanceBinding)
+		) {
+			return {
+				ok: true,
+				issuer: obj.issuer,
+				principal: obj.principal,
+				instanceBinding: obj.instanceBinding,
+			};
+		}
+		return { ok: false, reasonCode: "SECURITY_EVIDENCE" };
+	}
+	if (obj.ok === false) {
+		if (keys.length === 1) {
+			return { ok: false, reasonCode: "SECURITY_EVIDENCE" };
+		}
+		if (keys.length === 2 && typeof obj.reasonCode === "string" && DENIAL_CODES.has(obj.reasonCode as IdentityDenialCode)) {
+			return { ok: false, reasonCode: obj.reasonCode as IdentityDenialCode };
+		}
+	}
+	return { ok: false, reasonCode: "SECURITY_EVIDENCE" };
 }
 
 /**
@@ -149,8 +267,11 @@ function provenBy(request: IdentityAdmissionRequest, principal: string): boolean
 }
 
 class Instance implements CallerIdentity {
-	readonly admission: IdentityAdmissionPort;
-	readonly #rule: SessionRule;
+	readonly admission: CallerIdentityAdmissionPort;
+	readonly #rule: SessionRule | undefined;
+	readonly #mode: CallerIdentityMode | undefined;
+	readonly #redeemedVerifier: RedeemedAdmissionVerifier | undefined;
+	readonly #verifiers: readonly { readonly issuer: string; readonly verify: (credential: unknown) => unknown }[];
 	readonly #ruling: IdentityAdmissionPort | undefined;
 	readonly #deadlineMs: number;
 	readonly #clock: ClockPort;
@@ -163,26 +284,151 @@ class Instance implements CallerIdentity {
 	#generation = 0;
 
 	constructor(
-		rule: SessionRule,
+		rule: SessionRule | undefined,
+		mode: CallerIdentityMode | undefined,
+		redeemedVerifier: RedeemedAdmissionVerifier | undefined,
+		verifiers: readonly { readonly issuer: string; readonly verify: (credential: unknown) => unknown }[],
 		ruling: IdentityAdmissionPort | undefined,
 		deadlineMs: number,
 		clock: ClockPort,
 		diagnostic: DiagnosticPort | undefined,
 	) {
 		this.#rule = rule;
+		this.#mode = mode;
+		this.#redeemedVerifier = redeemedVerifier;
+		this.#verifiers = verifiers;
 		this.#ruling = ruling;
 		this.#deadlineMs = deadlineMs;
 		this.#clock = clock;
 		this.#diagnostic = diagnostic;
-		this.admission = Object.freeze({ evaluate: (request: IdentityAdmissionRequest) => this.#evaluate(request) });
+		const evaluate = (request: IdentityAdmissionRequest, options?: IdentityAdmissionEvaluateOptions) =>
+			this.#evaluate(request, options);
+		this.admission = mode === "authenticated"
+			? Object.freeze({ supportsRedeemedAdmission: true, evaluate })
+			: Object.freeze({ evaluate });
 	}
 
-	async #evaluate(request: IdentityAdmissionRequest): Promise<IdentityAdmissionResult> {
-		const result = this.#ruling === undefined ? ALLOW : await this.#ruleWithin(this.#ruling, request);
-		if (result.decision !== "allow") return result;
-		const { principal, proved } = ruled(this.#rule, request);
+	async #evaluate(
+		request: IdentityAdmissionRequest,
+		options?: IdentityAdmissionEvaluateOptions,
+	): Promise<IdentityAdmissionResult & { readonly authorizationAssociation?: AuthorizationAssociation }> {
+		const deadlineAt = this.#clock.now() + this.#deadlineMs;
+		if (this.#ruling !== undefined) {
+			const result = await this.#ruleWithin(this.#ruling, request, deadlineAt);
+			if (result.decision !== "allow") return result;
+		}
+		if (this.#mode === "authenticated") {
+			return this.#evaluateAuthenticated(request, options, deadlineAt);
+		}
+		const { principal, proved } = ruled(this.#rule!, request);
 		this.#records.admit(request.remoteNodeId, request.localSessionId, principal, proved, this.#clock.now());
-		return result;
+		return this.#mode === "unauthenticated" ? ALLOW_UNAUTHENTICATED : ALLOW;
+	}
+
+	/**
+	 * Evaluates `"authenticated"` session admission within the remaining `deadlineAt` budget on `#clock` (CI2, CI6).
+	 */
+	#evaluateAuthenticated(
+		request: IdentityAdmissionRequest,
+		options: unknown,
+		deadlineAt: number,
+	): Promise<IdentityAdmissionResult & { readonly authorizationAssociation?: AuthorizationAssociation }> {
+		if (this.#clock.now() >= deadlineAt) {
+			return Promise.resolve(DEADLINE_DENIAL);
+		}
+		const redeemed = options === undefined ? null : readRedeemedAdmissionOption(options);
+		if (redeemed === null) {
+			observePromises(options);
+			return Promise.resolve(SECURITY_DENIAL);
+		}
+		const verifier = this.#redeemedVerifier!;
+		const input = Object.freeze({
+			redemptionId: redeemed.redemptionId,
+			lifecycle: redeemed.lifecycle,
+			remoteNodeId: request.remoteNodeId,
+		});
+		return new Promise((resolve) => {
+			let settled = false;
+			const remaining = Math.max(1, Math.ceil(deadlineAt - this.#clock.now()));
+			let deadline: Cancellable;
+			const wake = (): void => {
+				if (settled) return;
+				const now = this.#clock.now();
+				if (now < deadlineAt) {
+					deadline = this.#clock.schedule(Math.ceil(deadlineAt - now), wake);
+					return;
+				}
+				settled = true;
+				resolve(DEADLINE_DENIAL);
+			};
+			deadline = this.#clock.schedule(remaining, wake);
+			const answer = (finish: (now: number) => void): void => {
+				if (settled) return;
+				settled = true;
+				deadline.cancel();
+				const now = this.#clock.now();
+				if (now >= deadlineAt) {
+					resolve(DEADLINE_DENIAL);
+					return;
+				}
+				finish(now);
+			};
+			const settleResult = (result: unknown): void => {
+				const parsed = readRedeemedVerifyResult(result);
+				answer((now) => {
+					if (!parsed.ok) {
+						resolve(Object.freeze({ decision: "deny", reasonCode: parsed.reasonCode }));
+						return;
+					}
+					this.#records.admit(request.remoteNodeId, request.localSessionId, parsed.principal, true, now);
+					resolve(
+						Object.freeze({
+							decision: "allow",
+							authorizationAssociation: Object.freeze({
+								mode: "authenticated" as const,
+								issuer: parsed.issuer,
+								principal: parsed.principal,
+								instanceBinding: parsed.instanceBinding,
+							}),
+						}),
+					);
+				});
+			};
+			let raw: unknown;
+			try {
+				raw = verifier.verifyRedeemed(input);
+			} catch (error) {
+				observePromises(error);
+				answer(() => resolve(SECURITY_DENIAL));
+				return;
+			}
+			let native = false;
+			try {
+				native = raw instanceof Promise;
+			} catch (error) {
+				observePromises(error);
+				observePromises(raw);
+				answer(() => resolve(SECURITY_DENIAL));
+				return;
+			}
+			if (native) {
+				try {
+					Reflect.apply(Promise.prototype.then, raw, [
+						(result: unknown) => settleResult(result),
+						(error: unknown) => {
+							observePromises(error);
+							answer(() => resolve(SECURITY_DENIAL));
+						},
+					]);
+				} catch (error) {
+					observePromises(error);
+					observePromises(raw);
+					answer(() => resolve(SECURITY_DENIAL));
+				}
+				return;
+			}
+			settleResult(raw);
+		});
 	}
 
 	/**
@@ -195,11 +441,9 @@ class Instance implements CallerIdentity {
 	 * allow, deny or rejection, that comes at or after the deadline is the POLICY denial, even if it runs
 	 * before the deadline's timer. The timer remains for a ruling that never answers.
 	 */
-	#ruleWithin(ruling: IdentityAdmissionPort, request: IdentityAdmissionRequest): Promise<IdentityAdmissionResult> {
+	#ruleWithin(ruling: IdentityAdmissionPort, request: IdentityAdmissionRequest, deadlineAt: number): Promise<IdentityAdmissionResult> {
 		return new Promise<IdentityAdmissionResult>((resolve, reject) => {
 			let settled = false;
-			// The absolute deadline on the clock port, captured as admission begins.
-			const deadlineAt = this.#clock.now() + this.#deadlineMs;
 			// A timer wakeup is not an event: on each, the clock is read, and only once it shows the deadline
 			// passed is the ruling denied. A timer that runs early is scheduled again for the time remaining,
 			// rounded up, so the answer's path and the timer's both judge by the clock alone.
@@ -345,9 +589,26 @@ class Instance implements CallerIdentity {
 		return Object.freeze({ node, session, principal: record.principal, proved: record.proved });
 	}
 
-	evidence(delivery: DeliveryEvidenceInput): AgpSessionEvidence {
+	verify(credential: unknown): Promise<VerifiedCredential | null> {
+		return runVerifiers(this.#verifiers, credential, this.#clock, this);
+	}
+
+	evidence(delivery: DeliveryEvidenceInput): AgpSessionEvidence;
+	evidence(delivery: DeliveryEvidenceInput, verified: VerifiedCredential): VerifiedPrincipalEvidence;
+	evidence(delivery: DeliveryEvidenceInput, verified?: VerifiedCredential): RequestEvidence {
 		const node = delivery?.source?.originNodeId;
 		if (typeof (node as unknown) !== "string") throw new TypeError("a delivery context names its origin in source.originNodeId");
+		if (verified !== undefined) {
+			const cred = assertValidVerifiedCredential(verified, this, this.#clock);
+			return Object.freeze({
+				kind: "verified-principal",
+				node,
+				principal: cred.principal,
+				issuer: cred.issuer,
+				proved: true,
+				expiresAt: cred.expiresAt,
+			});
+		}
 		const ingressNode = delivery.ingressNodeId;
 		const ingressSession = delivery.ingressSessionId;
 		const record = ingressNode === node && ingressSession !== undefined

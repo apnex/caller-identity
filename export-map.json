@@ -3,12 +3,11 @@
   "paths": {
     ".": {
       "exports": {
-        "createCallerIdentity": { "part": "caller-identity", "serves": ["session-principal", "request-evidence"] },
-        "assertedNodeRule": { "part": "caller-identity", "serves": ["session-principal"] }
+        "createCallerIdentity": { "part": "caller-identity", "serves": ["session-principal", "request-evidence", "verified-principal"] },
+        "assertedNodeRule": { "part": "caller-identity", "serves": ["session-principal"] },
+        "verifyCredential": { "part": "caller-identity", "serves": ["verified-principal"] }
       }
     }
   },
-  "deferred": {
-    "verified-principal": "D37"
-  }
+  "deferred": {}
 }

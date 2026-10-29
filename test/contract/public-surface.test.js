@@ -54,12 +54,13 @@ test("every contract row is served by an export or deferred with a ruling, never
 	}
 });
 
-test("Delta 1's fence: session-principal and request-evidence are served, verified-principal is deferred under zorg's D37 and built by nothing", async () => {
+test("D10-E1: session-principal, request-evidence and verified-principal are all served, and verified-principal is no longer deferred", async () => {
 	const served = new Set(Object.values(map.paths).flatMap((e) => Object.values(e.exports)).flatMap((x) => x.serves));
 	assert.ok(served.has("session-principal"));
 	assert.ok(served.has("request-evidence"));
-	assert.deepEqual(map.deferred, { "verified-principal": "D37" });
-	assert.equal(fs.existsSync(path.join(root, "test", "contract", "verified-principal.test.js")), false);
+	assert.ok(served.has("verified-principal"));
+	assert.deepEqual(map.deferred, {});
+	assert.equal(fs.existsSync(path.join(root, "test", "contract", "verified-principal.test.js")), true);
 });
 
 const sources = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((d) => d.isDirectory() ? sources(path.join(dir, d.name)) : [path.join(dir, d.name)]);
