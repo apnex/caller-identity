@@ -125,12 +125,11 @@ async function settleNativePromiseOrValue(raw: unknown): Promise<{ readonly ok: 
 	});
 }
 
-/** Reads one verifier's settled return value as plain data (CI6, D54, D55). */
+/** Reads one verifier's settled plain-JSON reading (CI6, D54, D55). */
 function readVerifierOutput(
-	raw: unknown,
+	plain: ReturnType<typeof readPlainJson>,
 	nowAtCompletion: number,
 ): { readonly principal: string; readonly expiresAt: number | null; readonly session: string | null } | null {
-	const plain = readPlainJson(raw);
 	if (!plain.ok || plain.value === null) return null;
 	if (typeof plain.value !== "object" || Array.isArray(plain.value)) return null;
 	const obj = plain.value as Record<string, unknown>;
@@ -174,10 +173,14 @@ export async function runVerifiers(
 			continue;
 		}
 		const settled = await settleNativePromiseOrValue(raw);
+		if (!settled.ok) {
+			finalNow = clock.now();
+			continue;
+		}
+		const plain = readPlainJson(settled.value);
 		const nowAfter = clock.now();
 		finalNow = nowAfter;
-		if (!settled.ok) continue;
-		const parsed = readVerifierOutput(settled.value, nowAfter);
+		const parsed = readVerifierOutput(plain, nowAfter);
 		if (parsed === null) continue;
 		accepted.push({
 			issuer: verifier.issuer,

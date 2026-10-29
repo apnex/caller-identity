@@ -335,34 +335,46 @@ test("CI6, D10-E1: multiple verifiers — agreeing verifiers take the minimum fi
 
 	// 7) Overall-completion expiry across multiple verifiers: if an earlier verifier accepts with expiresAt: 105
 	// and a subsequent verifier advances the clock to 104 (valid) vs 105 or 106 (expired at overall completion -> null),
+	// either inside verify() or inside a Proxy trap during readPlainJson (for both valid and refused shapes),
 	// both verifyCredential and callerIdentity.verify enforce expiry at overall completion.
 	for (const [endTime, shouldPass] of [[104, true], [105, false], [106, false]]) {
 		for (const useInstance of [false, true]) {
-			const c = new ManualClock(100);
-			const verifiers = [
-				{ issuer: "iss", verify: () => ({ principal: "alice", expiresAt: 105 }) },
-				{
-					issuer: "iss",
-					verify: () => {
-						c.setTime(endTime);
-						return null;
+			for (const mode of ["callback", "proxy-valid", "proxy-refused"]) {
+				const c = new ManualClock(100);
+				const verifiers = [
+					{ issuer: "iss", verify: () => ({ principal: "alice", expiresAt: 105 }) },
+					{
+						issuer: "iss",
+						verify: () => {
+							if (mode === "callback") {
+								c.setTime(endTime);
+								return null;
+							}
+							const target = mode === "proxy-valid" ? { principal: "alice" } : { extra: true };
+							return new Proxy(target, {
+								ownKeys(t) {
+									c.setTime(endTime);
+									return Reflect.ownKeys(t);
+								},
+							});
+						},
 					},
-				},
-			];
-			const out = useInstance
-				? await createCallerIdentity({ rule: assertedNodeRule, clock: c, verifiers }).verify("cred")
-				: await verifyCredential(verifiers, "cred", { clock: c });
-			if (shouldPass) {
-				assert.deepEqual(out, {
-					kind: "verified-credential",
-					principal: "alice",
-					issuer: "iss",
-					proved: true,
-					expiresAt: 105,
-					session: null,
-				});
-			} else {
-				assert.equal(out, null, `expired at overall completion (${endTime}) must resolve null`);
+				];
+				const out = useInstance
+					? await createCallerIdentity({ rule: assertedNodeRule, clock: c, verifiers }).verify("cred")
+					: await verifyCredential(verifiers, "cred", { clock: c });
+				if (shouldPass) {
+					assert.deepEqual(out, {
+						kind: "verified-credential",
+						principal: "alice",
+						issuer: "iss",
+						proved: true,
+						expiresAt: 105,
+						session: null,
+					});
+				} else {
+					assert.equal(out, null, `expired at overall completion (${endTime}, ${mode}) must resolve null`);
+				}
 			}
 		}
 	}
