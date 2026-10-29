@@ -162,6 +162,7 @@ export async function runVerifiers(
 	owner: object | null,
 ): Promise<VerifiedCredential | null> {
 	const accepted: { readonly issuer: string; readonly principal: string; readonly expiresAt: number | null; readonly session: string | null }[] = [];
+	let finalNow = 0;
 	for (const verifier of verifiers) {
 		clock.now();
 		let raw: unknown;
@@ -169,11 +170,12 @@ export async function runVerifiers(
 			raw = verifier.verify(credential);
 		} catch (error) {
 			observePromises(error);
-			clock.now();
+			finalNow = clock.now();
 			continue;
 		}
 		const settled = await settleNativePromiseOrValue(raw);
 		const nowAfter = clock.now();
+		finalNow = nowAfter;
 		if (!settled.ok) continue;
 		const parsed = readVerifierOutput(settled.value, nowAfter);
 		if (parsed === null) continue;
@@ -204,6 +206,9 @@ export async function runVerifiers(
 				sessionConflict = true;
 			}
 		}
+	}
+	if (minExpiresAt !== null && !(finalNow < minExpiresAt)) {
+		return null;
 	}
 	const verified: VerifiedCredential = Object.freeze({
 		kind: "verified-credential",

@@ -332,6 +332,40 @@ test("CI6, D10-E1: multiple verifiers — agreeing verifiers take the minimum fi
 		const v2 = { issuer: "iss-2", verify: () => ({ principal: "alice" }) };
 		assert.equal(await verifyCredential([v1, v2], "cred", { clock }), null);
 	}
+
+	// 7) Overall-completion expiry across multiple verifiers: if an earlier verifier accepts with expiresAt: 105
+	// and a subsequent verifier advances the clock to 104 (valid) vs 105 or 106 (expired at overall completion -> null),
+	// both verifyCredential and callerIdentity.verify enforce expiry at overall completion.
+	for (const [endTime, shouldPass] of [[104, true], [105, false], [106, false]]) {
+		for (const useInstance of [false, true]) {
+			const c = new ManualClock(100);
+			const verifiers = [
+				{ issuer: "iss", verify: () => ({ principal: "alice", expiresAt: 105 }) },
+				{
+					issuer: "iss",
+					verify: () => {
+						c.setTime(endTime);
+						return null;
+					},
+				},
+			];
+			const out = useInstance
+				? await createCallerIdentity({ rule: assertedNodeRule, clock: c, verifiers }).verify("cred")
+				: await verifyCredential(verifiers, "cred", { clock: c });
+			if (shouldPass) {
+				assert.deepEqual(out, {
+					kind: "verified-credential",
+					principal: "alice",
+					issuer: "iss",
+					proved: true,
+					expiresAt: 105,
+					session: null,
+				});
+			} else {
+				assert.equal(out, null, `expired at overall completion (${endTime}) must resolve null`);
+			}
+		}
+	}
 });
 
 // 4. callerIdentity.evidence(delivery, verified?) provenance, clock matching, and expiry-at-use (CI3, CI4, CI6)
@@ -655,11 +689,45 @@ test("CI2, CI6, D54, D55, D10-E1: \"authenticated\" mode descriptor-safe options
 		{ redeemedAdmission: { redemptionId: "r1", lifecycle: "not-an-object" } },
 	];
 
-	for (const badOpt of badOptionsList) {
-		const res = await ci.admission.evaluate(admissionRequest("alice.1", "000001"), badOpt);
-		assert.deepEqual(res, { decision: "deny", reasonCode: "SECURITY_EVIDENCE" });
-		assert.equal(ci.sessionPrincipal("alice.1", "000001"), null);
-	}
+	const revokedOuter = Proxy.revocable({ redeemedAdmission: { redemptionId: "r1", lifecycle } }, {});
+	revokedOuter.revoke();
+	const revokedInner = Proxy.revocable({ redemptionId: "r1", lifecycle }, {});
+	revokedInner.revoke();
+
+	const proxyOptionsList = [
+		revokedOuter.proxy,
+		{ redeemedAdmission: revokedInner.proxy },
+		new Proxy(
+			{ redeemedAdmission: { redemptionId: "r1", lifecycle } },
+			{
+				getPrototypeOf() {
+					const err = new Error("CI2 malformed options");
+					err.nested = Promise.reject(new Error("D55 option proxy nested rejection"));
+					throw err;
+				},
+			},
+		),
+		{
+			redeemedAdmission: new Proxy(
+				{ redemptionId: "r1", lifecycle },
+				{
+					getOwnPropertyDescriptor() {
+						throw { nested: Promise.reject(new Error("D55 redeemedAdmission proxy nested rejection")) };
+					},
+				},
+			),
+		},
+	];
+
+	const proxyEscaped = await observingUnhandledRejections(async () => {
+		for (const badOpt of [...badOptionsList, ...proxyOptionsList]) {
+			const res = await ci.admission.evaluate(admissionRequest("alice.1", "000001"), badOpt);
+			assert.deepEqual(res, { decision: "deny", reasonCode: "SECURITY_EVIDENCE" });
+			assert.ok(Object.isFrozen(res));
+			assert.equal(ci.sessionPrincipal("alice.1", "000001"), null);
+		}
+	});
+	assert.deepEqual(proxyEscaped, [], "no unhandled rejection escaped from throwing proxy options");
 	assert.equal(getterCalls, 0, "no getter on options or redeemedAdmission was called");
 	assert.equal(verifierCalls, 0, "verifyRedeemed was not called when options were invalid");
 

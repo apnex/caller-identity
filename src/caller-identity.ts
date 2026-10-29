@@ -139,44 +139,64 @@ function readAdmissionResult(value: unknown): IdentityAdmissionResult | undefine
 }
 
 /**
- * Reads `options` and `options.redeemedAdmission` via own enumerable data descriptors only (CI2, CI6, D54):
- * never invokes a getter, rejects symbol properties or non-plain objects, and requires a valid bounded identifier
- * `redemptionId` and non-null object `lifecycle` (preserving exact object identity of `lifecycle`).
+ * Reads `options` and `options.redeemedAdmission` via own enumerable data descriptors only (CI2, CI6, D54, D55):
+ * never invokes a getter, catches any Proxy trap throw, observes any reachable native promises on refusal, rejects
+ * symbol properties or non-plain objects, and requires a valid bounded identifier `redemptionId` and non-null object
+ * `lifecycle` (preserving exact object identity of `lifecycle`).
  */
 function readRedeemedAdmissionOption(options: unknown): { readonly redemptionId: string; readonly lifecycle: object } | null {
-	if (typeof options !== "object" || options === null || Array.isArray(options)) return null;
-	const optProto = Object.getPrototypeOf(options);
-	if (optProto !== Object.prototype && optProto !== null) return null;
-	if (Object.getOwnPropertySymbols(options).length > 0) return null;
-	for (const key of Object.getOwnPropertyNames(options)) {
-		const desc = Object.getOwnPropertyDescriptor(options, key);
-		if (desc === undefined || !desc.enumerable || !("value" in desc)) return null;
-	}
-	const raDesc = Object.getOwnPropertyDescriptor(options, "redeemedAdmission");
-	if (raDesc === undefined || !raDesc.enumerable || !("value" in raDesc)) return null;
-	const ra = raDesc.value as unknown;
-	if (typeof ra !== "object" || ra === null || Array.isArray(ra)) return null;
-	const raProto = Object.getPrototypeOf(ra);
-	if (raProto !== Object.prototype && raProto !== null) return null;
-	if (Object.getOwnPropertySymbols(ra).length > 0) return null;
-	const raKeys = Object.getOwnPropertyNames(ra);
-	if (raKeys.length !== 2) return null;
-	const idDesc = Object.getOwnPropertyDescriptor(ra, "redemptionId");
-	const lcDesc = Object.getOwnPropertyDescriptor(ra, "lifecycle");
-	if (
-		idDesc === undefined ||
-		lcDesc === undefined ||
-		!idDesc.enumerable ||
-		!lcDesc.enumerable ||
-		!("value" in idDesc) ||
-		!("value" in lcDesc) ||
-		!isValidBoundedIdentifier(idDesc.value) ||
-		typeof lcDesc.value !== "object" ||
-		lcDesc.value === null
-	) {
+	const captured: unknown[] = [options];
+	const refuse = (): null => {
+		for (const item of captured) observePromises(item);
 		return null;
+	};
+	try {
+		if (typeof options !== "object" || options === null || Array.isArray(options)) return refuse();
+		const optProto = Object.getPrototypeOf(options);
+		if (optProto !== Object.prototype && optProto !== null) return refuse();
+		if (Object.getOwnPropertySymbols(options).length > 0) return refuse();
+		for (const key of Object.getOwnPropertyNames(options)) {
+			const desc = Object.getOwnPropertyDescriptor(options, key);
+			if (desc !== undefined && Object.hasOwn(desc, "value")) captured.push(desc.value);
+			if (desc === undefined || !desc.enumerable || !Object.hasOwn(desc, "value")) return refuse();
+		}
+		const raDesc = Object.getOwnPropertyDescriptor(options, "redeemedAdmission");
+		if (raDesc !== undefined && Object.hasOwn(raDesc, "value")) captured.push(raDesc.value);
+		if (raDesc === undefined || !raDesc.enumerable || !Object.hasOwn(raDesc, "value")) return refuse();
+		const ra = raDesc.value as unknown;
+		if (typeof ra !== "object" || ra === null || Array.isArray(ra)) return refuse();
+		const raProto = Object.getPrototypeOf(ra);
+		if (raProto !== Object.prototype && raProto !== null) return refuse();
+		if (Object.getOwnPropertySymbols(ra).length > 0) return refuse();
+		const raKeys = Object.getOwnPropertyNames(ra);
+		if (raKeys.length !== 2) return refuse();
+		for (const key of raKeys) {
+			const desc = Object.getOwnPropertyDescriptor(ra, key);
+			if (desc !== undefined && Object.hasOwn(desc, "value")) captured.push(desc.value);
+			if (desc === undefined || !desc.enumerable || !Object.hasOwn(desc, "value")) return refuse();
+		}
+		const idDesc = Object.getOwnPropertyDescriptor(ra, "redemptionId");
+		const lcDesc = Object.getOwnPropertyDescriptor(ra, "lifecycle");
+		if (idDesc !== undefined && Object.hasOwn(idDesc, "value")) captured.push(idDesc.value);
+		if (lcDesc !== undefined && Object.hasOwn(lcDesc, "value")) captured.push(lcDesc.value);
+		if (
+			idDesc === undefined ||
+			lcDesc === undefined ||
+			!idDesc.enumerable ||
+			!lcDesc.enumerable ||
+			!Object.hasOwn(idDesc, "value") ||
+			!Object.hasOwn(lcDesc, "value") ||
+			!isValidBoundedIdentifier(idDesc.value) ||
+			typeof lcDesc.value !== "object" ||
+			lcDesc.value === null
+		) {
+			return refuse();
+		}
+		return { redemptionId: idDesc.value, lifecycle: lcDesc.value as object };
+	} catch (error) {
+		captured.push(error);
+		return refuse();
 	}
-	return { redemptionId: idDesc.value, lifecycle: lcDesc.value as object };
 }
 
 /**
