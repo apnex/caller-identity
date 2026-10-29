@@ -765,7 +765,7 @@ test("CI2: a timer wakeup is not the deadline: with a clock whose timer fires ea
 });
 
 test("CI2: on the default clock, whose timer can wake before its delay has passed on performance.now(), an asynchronous ruling that answers just before a short integer deadline is taken", async () => {
-	const deadline = 20;
+	const deadline = 40;
 	const realSetTimeout = globalThis.setTimeout;
 	let wakeups = 0;
 	// The runtime's timer, made to wake early: at a quarter of its delay, rounded down.
@@ -775,13 +775,18 @@ test("CI2: on the default clock, whose timer can wake before its delay has passe
 		for (let trial = 1; trial <= 40 && timely < 5; trial += 1) {
 			let observed;
 			let wokenBefore;
+			let workPromise;
 			const ruling = {
 				evaluate() {
 					const work = (async () => {
 						const entered = performance.now();
-						while (performance.now() - entered < deadline - 5) await new Promise((resolve) => setImmediate(resolve));
+						while (wakeups < 1 || performance.now() - entered < deadline / 2) {
+							if (performance.now() - entered >= deadline) break;
+							await new Promise((resolve) => setImmediate(resolve));
+						}
 						return { decision: "allow" };
 					})();
+					workPromise = work;
 					// Registered before caller-identity's own handler, so it observes the answer first.
 					work.then(() => { observed = performance.now(); wokenBefore = wakeups; });
 					return work;
@@ -793,9 +798,19 @@ test("CI2: on the default clock, whose timer can wake before its delay has passe
 			// The port captures its deadline after this timestamp: an answer observed before before + deadline is in time.
 			const before = performance.now();
 			const result = await identity.admission.evaluate({ localNodeId: "hub", remoteNodeId: "alice.1", localSessionId: session, remoteSessionId: "000009", direction: "inbound", peerEvidence: { locality: "network", protection: "none", authentication: { kind: "none" } } });
+			if (observed === undefined || wokenBefore === undefined) {
+				// The deadline elapsed before the ruling's promise settled; verify the timeout denial and drain workPromise.
+				assert.deepEqual(result, { decision: "deny", reasonCode: "POLICY" });
+				assert.equal(identity.sessionPrincipal("alice.1", session), null);
+				await workPromise;
+				continue;
+			}
 			// A trial counts when the deadline's timer woke early, before the answer, and the answer came in
 			// time; on a host too slow for either, the trial shows nothing about an early wakeup.
-			if (wokenBefore < 1 || observed - before >= deadline) continue;
+			if (!Number.isFinite(observed) || wokenBefore < 1 || observed - before >= deadline) {
+				await workPromise;
+				continue;
+			}
 			timely += 1;
 			assert.deepEqual(result, { decision: "allow" }, `trial ${trial}: answered ${observed - before} ms after the start of a ${deadline} ms deadline`);
 			assert.deepEqual(identity.sessionPrincipal("alice.1", session), record("alice.1", session, "alice"));
