@@ -557,7 +557,7 @@ test("CI2, E18: a host ruling that never answers is denied at the admission dead
 		},
 	};
 	// No admission deadline is given: the default, 10 seconds on the clock port, applies.
-	const { clock, host, peer } = await setUp(t, { ruling, sessionIds: ["00abcd", "00abcd"], openTimeoutMs: 250 });
+	const { clock, host, peer } = await setUp(t, { ruling, sessionIds: ["00abcd", "00abcd"] });
 	t.after(() => answerLate?.({ decision: "allow" }));
 	const alice = await peer("alice.1");
 	assert.equal(await host.sessionWith("alice.1"), "00abcd");
@@ -567,10 +567,10 @@ test("CI2, E18: a host ruling that never answers is denied at the admission dead
 	clock.advanceTo(sweep(2) - 1_000);
 	await peer("bob.1");
 	await eventually(() => entered, "bob's admission to reach the host's ruling");
-	// AGP's opening time-out ends bob's opening, but AGP keeps the connection pending while it awaits admission.
-	const expired = await eventually(() => host.connections().find((c) => c.identityState === "pending" && c.lastTransition.event === "OpenExpired"),
-		"AGP's opening time-out on bob's connection");
-	assert.equal(expired.localSessionId, "00abcd");
+	// AGP keeps bob's connection pending while it awaits admission.
+	const pendingConn = await eventually(() => host.connections().find((c) => c.identityState === "pending" && c.lastTransition.event === "OpenReceived"),
+		"bob's pending connection awaiting admission");
+	assert.equal(pendingConn.localSessionId, "00abcd");
 	clock.advanceTo(sweep(2));
 	found(host, "alice.1", "00abcd");
 	clock.advanceTo(sweep(2) + 9_000 - 1);
@@ -578,7 +578,7 @@ test("CI2, E18: a host ruling that never answers is denied at the admission dead
 	assert.ok(present(host, "alice.1", "00abcd"), "before the deadline, AGP still awaits the ruling");
 	clock.advanceTo(sweep(2) + 9_000);
 	await eventually(() => host.connections().length === 0, "AGP to release bob's connection once the deadline denies it");
-	assert.equal((await host.refused("00abcd")).data.reason, "OpenExpired", "AGP reports the expired opening only once it releases the connection");
+	assert.equal((await host.refused("00abcd")).data.reason, "IDENTITY_REJECTED", "AGP reports the admission deadline denial when it releases the connection");
 	assert.equal(host.identity.sessionPrincipal("bob.1", "00abcd"), null, "a denied session is not recorded");
 	answerLate({ decision: "allow" });
 	await new Promise((resolve) => setTimeout(resolve, 20));

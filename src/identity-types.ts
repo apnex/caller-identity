@@ -149,7 +149,7 @@ export interface IdentityAdmissionEvaluateOptions {
  * before and after AGP publishes `agp.admission-acquisition/v2`.
  */
 export interface CallerIdentityAdmissionPort extends IdentityAdmissionPort {
-	readonly supportsRedeemedAdmission?: boolean;
+	readonly supportsRedeemedAdmission?: true;
 	evaluate(
 		request: IdentityAdmissionRequest,
 		options?: IdentityAdmissionEvaluateOptions,
