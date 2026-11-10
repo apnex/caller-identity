@@ -1,8 +1,8 @@
 ---
-id: unminted
+id: C7
 category: component
 title: caller-identity - the principal each request comes from, from its caller's evidence and the host's rules
-status: draft
+status: active
 hydrate-when: A service must know which principal each request comes from, to record a writer or rule on a request, and you are about to map connections to callers by hand
 sovereignty: internal
 supersedes: []
@@ -12,8 +12,8 @@ related: [C0, A3]
 # caller-identity
 
 The contract of record for caller-identity: what a consumer can depend on, admitted to zorg's component set by the director's rulings `D35` and `D37` in zorg's `docs/DECISIONS.md`; its vision is ratified (zorg's `D43`), and this contract is a draft until its capabilities are built and verified.\
-It also carries the fields of a mission-kit registry entry, and that entry is generated from this file when the component is filed, never written as a second copy.\
-The registry id is unminted on purpose; one is minted only when the entry is admitted to the registry.
+It also carries the fields of a mission-kit registry entry, and that entry is generated from this file, never written as a second copy.\
+Admitted to mission-kit's component registry as `C7`, its first release `0.1.0` (`docs/DECISIONS.md` `D3`); its frontmatter is the entry's.
 
 ---
 
@@ -102,7 +102,7 @@ Tested by: `D10-E1` (covering `CI2`, `CI3`, `CI4` and `CI6`), in `test/contract/
 
 ## Reference
 
-This repository, `apnex/caller-identity`, private until its first working code is certified.\
+This repository, `apnex/caller-identity`, and its package `@apnex/caller-identity`, released only by its own CI as a tarball attached to a GitHub release, drafted, verified and then published (`.github/workflows/release.yml`).\
 The package `@apnex/caller-identity` exports `createCallerIdentity`, which gives a host its identity-admission port, the sweeps it starts and stops with its node, each session's record, credential verification and each request's evidence, `assertedNodeRule`, and `verifyCredential`, as `export-map.json` records.\
 It depends on `@apnex/shape-check` through a `file:` link, takes AGP's types from `@agp/core` as a peer dependency through a `file:` link to AGP's checkout, imports nothing from AGP at run time, and imports no module particular to one runtime.
 

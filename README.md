@@ -10,7 +10,7 @@ Its contract tests run a host over AGP's production in-process carrier, with an 
 - `CONTRACT.md` - what a consumer can depend on, one capability per row.
 - `docs/DECISIONS.md` - the rulings about this component.
 
-It belongs to a component set first composed by zorg (`apnex/zorg`), and is private until its first working code.
+It belongs to a component set first composed by zorg (`apnex/zorg`), and is released only by its own CI, as a tarball attached to a GitHub release with its SHA-512 beside it, which a consumer names in its `package.json`: `https://github.com/apnex/caller-identity/releases/download/v0.1.0/apnex-caller-identity-0.1.0.tgz` for `0.1.0`.
 
 It depends on `@apnex/shape-check` through a `file:` link, and takes AGP's types as a peer of the host that embeds it, through a `file:` link to an AGP checkout beside it at `baa2c1a`, each installed and built first, since neither commits its `dist/`.\
 The tests link AGP's `@agp/node` and `@agp/transport-loopback` the same way, and Node resolves AGP's own packages from that checkout's workspace.

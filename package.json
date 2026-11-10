@@ -1,6 +1,6 @@
 {
   "name": "@apnex/caller-identity",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "description": "Establish the principal each request comes from, from the evidence its caller presented and the host's rules.",
   "license": "MIT",
@@ -11,7 +11,7 @@
   },
   "type": "module",
   "engines": {
-    "node": ">=24"
+    "node": ">=22"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -39,7 +39,12 @@
   "peerDependencies": {
     "@agp/core": "file:../agp/packages/core"
   },
+  "peerDependenciesMeta": {
+    "@agp/core": {
+      "optional": true
+    }
+  },
   "dependencies": {
-    "@apnex/shape-check": "file:../shape-check"
+    "@apnex/shape-check": "https://github.com/apnex/shape-check/releases/download/v0.1.0/apnex-shape-check-0.1.0.tgz"
   }
 }
