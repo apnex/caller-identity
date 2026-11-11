@@ -1,6 +1,6 @@
 {
   "name": "@apnex/caller-identity",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Establish the principal each request comes from, from the evidence its caller presented and the host's rules.",
   "license": "MIT",
@@ -37,7 +37,7 @@
     "typescript": "5.9.3"
   },
   "peerDependencies": {
-    "@agp/core": "file:../agp/packages/core"
+    "@agp/core": ">=0.1.0"
   },
   "peerDependenciesMeta": {
     "@agp/core": {
