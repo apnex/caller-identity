@@ -104,7 +104,7 @@ Tested by: `D10-E1` (covering `CI2`, `CI3`, `CI4` and `CI6`), in `test/contract/
 
 This repository, `apnex/caller-identity`, and its package `@apnex/caller-identity`, released only by its own CI as a tarball attached to a GitHub release, drafted, verified and then published (`.github/workflows/release.yml`).\
 The package `@apnex/caller-identity` exports `createCallerIdentity`, which gives a host its identity-admission port, the sweeps it starts and stops with its node, each session's record, credential verification and each request's evidence, `assertedNodeRule`, and `verifyCredential`, as `export-map.json` records.\
-It depends on `@apnex/shape-check` through a `file:` link, takes AGP's types from `@agp/core` as a peer dependency through a `file:` link to AGP's checkout, imports nothing from AGP at run time, and imports no module particular to one runtime.
+It depends on `@apnex/shape-check` through its release file, takes AGP's types from `@agp/core` as an optional peer dependency, `>=0.1.0`, its tests taking AGP's packages through `file:` links to AGP's checkout, imports nothing from AGP at run time, and imports no module particular to one runtime.
 
 ---
 

@@ -53,3 +53,20 @@ The five fixes every consumer of the components zorg maintains needs, made by dr
 
 **Why.**\
 Draw takes components as public GitHub release files pinned by hash and runs Node 22 in production (draw's `H26-2`); a `file:` link builds only beside a checkout, and an AGP declared for install would make every consumer install it though every import of it is a type.
+
+---
+
+## D4 - 0.1.1: the optional AGP peer as a version range
+
+**Ruled by:** the director, 2026-11-11 (draw's `H31-9`, on zorg's reply `upstream/drawv2-planning-contract-drafts-reply.md`, which asked for this change).\
+**Affects:** `package.json` and its lockfile, `README.md` and `CONTRACT.md`'s Reference; nothing in `src/`, and nothing the component does; a patch release, `0.1.1`.
+
+**Ruling.**\
+`peerDependencies["@agp/core"]` is `>=0.1.0`, where `0.1.0` declared `file:../agp/packages/core`; it stays optional (`peerDependenciesMeta`), and the tests still take AGP's packages as `file:` links in `devDependencies`, as zorg's answer 3 has them (`D3`).\
+A `file:` peer is resolved by npm from the installed package's own folder, where no AGP is, so the `0.1.0` release's peer matched no host's `@agp/core`, and every consumer that installed AGP beside it was refused by `npm install` (`ERESOLVE`); a range is matched by the host's own `@agp/core`, wherever it came from.\
+Shown in a scratch project holding AGP's `@agp/core`, packed from AGP's checkout with the two AGP packages it depends on: installing `0.1.0`'s release file failed with `ERESOLVE`, naming the `file:` peer, and installing this release's packed file succeeded, beside `@agp/core` `0.1.0`.\
+README.md's and CONTRACT.md's sentences on what the component depends on, which still named a `file:` link to shape-check after `0.1.0`, now name its release file and the peer's range.
+
+**Why.**\
+A consumer that runs AGP is the consumer this component serves; the fix was found in the `0.1.0` wave and asked for by zorg, whose surface test already accepts `*`, `>=0.1.0` or `^0.1.0`; `>=0.1.0` names the first AGP this component is written against without capping the host's.
+
